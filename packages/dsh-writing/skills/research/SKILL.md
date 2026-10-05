@@ -13,21 +13,32 @@ be reached by a reader who only has what you wrote.
 
 ## The one rule
 
-**No identifier you have not fetched.** A DOI, an ISBN, a page number, an arXiv
-id, a venue, a year, an author list: if you did not read it on a page you
-actually loaded, you do not write it. Search-result snippets are not pages -
-they routinely report the wrong year, the wrong venue and a truncated author
-list, and a model that has "seen" a paper in training will happily complete a
-plausible DOI for it. A fabricated reference is worse than a missing one: it
-survives review, gets cited onward, and destroys the document's credibility the
-moment anyone clicks it.
+**No identifier and no link you have not fetched.** A DOI, an ISBN, a page
+number, an arXiv id, a venue, a year, an author list: if you did not read it on a
+page you actually loaded, you do not write it. Search-result snippets are not
+pages - they routinely report the wrong year, the wrong venue and a truncated
+author list, and a model that has "seen" a paper in training will happily
+complete a plausible DOI for it. A fabricated reference is worse than a missing
+one: it survives review, gets cited onward, and destroys the document's
+credibility the moment anyone clicks it.
+
+**Every reference carries a link, and the link resolves.** A DOI is an
+identifier; a reader needs an address. Each entry ends with the URL you loaded
+(the publisher's landing page, the DOI under `https://doi.org/…`, the arXiv
+abstract page, the conference's own presentation page) - never a search-result
+URL, never a bare "Google Scholar" link, never a PDF mirror somebody uploaded.
+Check it the same way you checked the identifier: fetch it, and if it does not
+land on the document you are citing, fix it or drop the source. A reference whose
+link 404s is a reference a reader cannot check, which is the same as no reference
+and a worse look.
 
 Two corollaries, both learned the hard way:
 
 - **A citation you cannot resolve is deleted, not softened.** "A study found"
   with no resolvable source is a claim with no source. Delete it or find it.
-- **Say what you could not verify.** `[identifier unverified]` beside a
-  candidate is a professional result. A confident wrong DOI is not.
+- **Say what you could not verify.** `[identifier unverified]` or
+  `[link not reachable]` beside a candidate is a professional result. A confident
+  wrong DOI is not.
 
 ## Start from the decision, not the topic
 
@@ -108,17 +119,25 @@ For every source that will appear in the document:
 
 1. **Fetch the landing page** - publisher page, DOI resolver (`https://doi.org/…`)
    or arXiv abstract page. Not a search result.
-2. Read off the **exact title, the author list, the venue, the year** and the
-   **DOI** (or the arXiv id, or the stable URL if no DOI exists).
+2. Read off the **exact title, the author list, the venue, the year**, the
+   **DOI** (or the arXiv id) and the **URL you actually loaded**. Every one of
+   them goes into the reference: the URL is not decoration, it is how a reader
+   gets to the paper.
 3. Check that the thing you are citing **is the thing you read about**: same
    title, same authors. Two papers by the same group in the same year are the
    classic mix-up.
-4. Record the **retrieval date** and the URL you actually loaded.
-5. For anything load-bearing, check it is not **retracted** or **withdrawn**
+4. Record the **retrieval date** and re-check that the link still lands on the
+   paper before you publish - a link that redirects to a different paper, a
+   paywall home page or a 404 is a link to fix, not to ship.
+5. Prefer the **publisher's own page** over any mirror, aggregator or PDF
+   somebody re-uploaded: the publisher's page is the one that stays and the one
+   that cannot be edited out from under your citation.
+6. For anything load-bearing, check it is not **retracted** or **withdrawn**
    (the publisher page usually says so; `Retraction Watch` covers the rest).
 
-`reference/citations.md` has the IEEE reference forms end to end, the
-"receipt" fields, and the checks that catch a paper that does not exist.
+`reference/citations.md` has the IEEE reference forms end to end - each with its
+link - the "receipt" fields, and the checks that catch a paper that does not
+exist.
 
 ## Extract: one note per source
 
@@ -130,11 +149,12 @@ review.
 ```
 Title:
 Authors / Venue / Year / DOI:
+Link I loaded (the URL that goes in the reference):
 Claim it makes (one sentence, in my words):
 Evidence (method, data, scale, baseline):
 What it does NOT show (scope, threats to validity, what the authors say):
 What I can reuse or build (technique, tool, dataset, number):
-How I verified the identifier (URL fetched, date):
+How I verified it (the pages fetched, and the date):
 ```
 
 The "does not show" line is the one that keeps a state-of-the-art honest. Papers
@@ -185,15 +205,18 @@ such tool, write a `.md` file in the conversation folder - the Writing tab's
 produced and what you could not verify.
 
 Cite in IEEE style by default (`[1]`, numbered in order of first mention). The
-forms are in `reference/citations.md`. Every reference carries its identifier,
-and every reference in the list is mentioned in the text - a reference list with
-an uncited entry is a reference list with padding.
+forms are in `reference/citations.md`, and **every one of them ends with a link**
+- `doi: …` for the identifier and `[Online]. Available: …` for the address, so a
+reader can click from the reference list to the paper. Every reference in the
+list is mentioned in the text - a reference list with an uncited entry is a
+reference list with padding.
 
 ## Failure modes to refuse
 
 | Failure | What it looks like | The fix |
 |---|---|---|
 | Fabricated identifier | a DOI that resolves to a different paper, or 404s | fetch it; delete it if it does not resolve |
+| Dead or wrong link | the reference carries a search URL, a mirror, or a link that moved | re-fetch it and put the page you landed on |
 | Snippet-derived metadata | right title, wrong year or venue | read the landing page |
 | Retracted source | the paper is withdrawn; the page says so | check the page, replace the source |
 | Predatory / no-review venue | "International Journal of Advanced …", pay-to-publish, no editor | prefer venues the field actually cites |

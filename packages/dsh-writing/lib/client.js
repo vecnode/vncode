@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     /** The version marker shown in the status bar, so a fresh bundle is easy to spot. */
-    const PLUGIN_VERSION = '0.1.0-alpha.5'
+    const PLUGIN_VERSION = '0.1.0-alpha.6'
     /** The conversation view this package adds to the chat panel's ring. */
     const VIEW_ID = 'writing'
     /** Base URL of this plugin's own authenticated routes. */
@@ -110,8 +110,6 @@ window.__ModuleLoader__.load({
     const TAB_TYPES_SERVICE = 'sidebarRightTabs'
     /** The shipped document preview's registry id; its KIND is read from the registry. */
     const PREVIEW_TYPE_ID = '@deepseek-ai/dsh-client-ui-sidebar-documentpreview'
-    /** The preview's kind on the pinned line, used only when the registry has no such type. */
-    const PREVIEW_FALLBACK_KIND = 'text'
     /** Address grammar owned by @deepseek-ai/dsh-util-workspace-path. */
     const FILE_ADDRESS_PREFIX = 'dsh-resource://file/session/'
     /** CSS pixels per millimetre at 100% page scale (96 dpi). */
@@ -127,7 +125,7 @@ window.__ModuleLoader__.load({
      * precision about where the last page break falls.
      */
     const MAX_LINE_SCAN = 2400
-    /** The zoom ladder. The editor is laid out in pixels; this only widens the column. */
+    /** The zoom ladder. The column always fills the pane; this scales the TYPE in it. */
     const ZOOM_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2]
     /** How long typing rests before the document saves itself. */
     const AUTOSAVE_MS = 4000
@@ -250,6 +248,30 @@ window.__ModuleLoader__.load({
       if (typeof run.font === 'string' && run.font.length > 0) parts.push("font-family:'" + String(run.font).replaceAll("'", '') + "'")
       if (Number.isFinite(run.size)) parts.push('font-size:' + run.size + 'pt')
       return parts.join(';')
+    }
+
+    /**
+     * The DATA ATTRIBUTES one run's family and size produce.
+     *
+     * A run's own typography is carried as data as well as paint, and the reason is
+     * the same one the marks already ride on `data-mark` for - plus a harder one:
+     * **Editor.js's saver SANITIZES what it saves** (`Saver.save()` runs the saved
+     * data through the tool's own `sanitize` config, measured in
+     * `check-writing-browser.mjs`), and the sanitizer keeps `data-*` attributes that
+     * the config names while dropping the `style` attribute entirely. So a size
+     * written only as `style="font-size:18pt"` survives the paint and is GONE by the
+     * next model read - which is exactly what a run whose size vanished the moment
+     * the person stopped typing looked like. The style stays, because it is what the
+     * browser draws; the attributes are what the round trip reads.
+     *
+     * @param run - a run.
+     * @returns the attribute text (with a leading space), or `''`.
+     */
+    function runAttributes(run) {
+      const parts = []
+      if (typeof run.font === 'string' && run.font.length > 0) parts.push('data-font="' + escapeHtml(run.font) + '"')
+      if (Number.isFinite(run.size)) parts.push('data-size="' + run.size + '"')
+      return parts.length > 0 ? ' ' + parts.join(' ') : ''
     }
 
     /** Whether two runs carry the same properties, so their text may merge. */
@@ -639,8 +661,10 @@ window.__ModuleLoader__.load({
           if (text.length === 0) return ''
           const marks = (Array.isArray(run.marks) ? run.marks : []).filter((mark) => MARK_BUTTONS.some((entry) => entry[0] === mark))
           const style = runStyle(run)
+          const data = runAttributes(run)
           const attributes = []
           if (marks.length > 0) attributes.push(MARK_ATTRIBUTE + '="' + escapeHtml(marks.join(' ')) + '"')
+          if (data.length > 0) attributes.push(data.trim())
           if (style.length > 0) attributes.push('style="' + escapeHtml(style) + '"')
           // ONE element per run, never a shared one: neighbouring runs have
           // DIFFERENT marks, so wrapping them together would make the reader hand
@@ -768,10 +792,20 @@ window.__ModuleLoader__.load({
           continue
         }
         const style = parseRunStyle(tag.attributes.style ?? '')
+        // A run's own family and size are read from the DATA first and the inline
+        // style second: the attributes are what survives Editor.js's save-time
+        // sanitizer (see `runAttributes`), and the style is what a paste from Word
+        // or a browser's own formatting arrives with.
+        const declaredSize = Number(tag.attributes['data-size'])
+        const declaredFont = tag.attributes['data-font'] ?? ''
+        const runStyleHere = {
+          font: declaredFont.length > 0 ? declaredFont : style.font,
+          size: Number.isFinite(declaredSize) && declaredSize > 0 ? declaredSize : style.size,
+        }
         const declared = String(tag.attributes[MARK_ATTRIBUTE] ?? '').toLowerCase().split(/[\s,]+/).filter((mark) => mark.length > 0)
         flush()
         if (!tag.selfClosing) {
-          stack.push({ mark: markForTag(tag.name), marks: declared, font: style.font, size: style.size })
+          stack.push({ mark: markForTag(tag.name), marks: declared, font: runStyleHere.font, size: runStyleHere.size })
         }
       }
       flush()
@@ -1142,6 +1176,173 @@ window.__ModuleLoader__.load({
     }
 
     // -----------------------------------------------------------------------
+    // Typography on a RANGE of the document
+    //
+    // A family and a size are RUN properties: they belong to a character range,
+    // not to the document (`w:rPr/w:rFonts` and `w:sz` are per run; the document's
+    // own pair lives in `w:docDefaults`), and the bar's two controls therefore set
+    // them on the SELECTION. The model is the single answer - `propertiesAt` says
+    // what a caret carries and `applyAttributeToRuns` is where a range's property is
+    // decided, with `check-client-bundles.mjs` driving both algebras with no browser
+    // - and the editor is re-rendered from the model, with the caret put back,
+    // rather than the DOM being patched behind the model's back.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Wait until an Editor.js instance has published its API.
+     *
+     * THE API IS NOT THERE AT CONSTRUCTION. Editor.js 2.31.7's exported class builds
+     * the real editor asynchronously and only installs `blocks`/`caret`/`events`/
+     * `save`/`render` onto the instance when its own `isReady` promise resolves - so
+     * a caller that reaches for `editor.render(...)` straight after `new EditorJS()`
+     * gets "editor.render is not a function" and, worse, leaves the previous
+     * document on screen while the status bar carries that error. Every call into
+     * the instance goes through here.
+     *
+     * @param editor - the Editor.js instance.
+     * @returns the same instance, ready.
+     */
+    async function editorReady(editor) {
+      if (editor && editor.isReady && typeof editor.isReady.then === 'function') await editor.isReady
+      return editor
+    }
+
+    /**
+     * Put a document's blocks into a mounted editor.
+     *
+     * `editor.blocks.render(data)` is the 2.30+ spelling and the one this pin
+     * documents; the instance-level `render(data)` is kept as the fallback because
+     * this build copies it too. Both broken call sites (the document-open effect and
+     * the run-property write) meet here, so a bump that renames the method again has
+     * one place to correct.
+     *
+     * @param editor - the Editor.js instance.
+     * @param data - `{ time, blocks }`.
+     * @returns the render's own promise.
+     */
+    async function renderIntoEditor(editor, data) {
+      await editorReady(editor)
+      if (editor && editor.blocks && typeof editor.blocks.render === 'function') return editor.blocks.render(data)
+      if (editor && typeof editor.render === 'function') return editor.render(data)
+      throw new Error('this Editor.js build renders through neither editor.blocks.render nor editor.render')
+    }
+
+    /** The editable element of one block of the mounted editor, or null. */
+    function blockElementAt(host, index) {
+      if (!host || !Number.isFinite(index) || index < 0) return null
+      const block = host.querySelectorAll('.ce-block')[index] ?? null
+      return block ? block.querySelector('[contenteditable="true"]') : null
+    }
+
+    /**
+     * The block the caret is in, as the EDITOR addresses it: its wrapper element,
+     * its editable, the block id Editor.js stamped on the wrapper (`Block.compose()`
+     * sets `wrapper.dataset.id = block.id`) and its index among the rendered blocks.
+     *
+     * The ID is the point: `blocks.update(id, data)` is Editor.js's own way to change
+     * one block, and it is addressed by id rather than by index - so a document whose
+     * model indexes and editor indexes differ (one `list` block holds many model list
+     * items) cannot make this write to the wrong block.
+     *
+     * @param host - the editor holder.
+     * @returns `{ wrapper, editable, id, index }`, or null.
+     */
+    function caretTarget(host) {
+      const selection = typeof window !== 'undefined' && window.getSelection ? window.getSelection() : null
+      if (!host || !selection || selection.rangeCount === 0) return null
+      const node = selection.getRangeAt(0).startContainer
+      if (!node || !host.contains(node)) return null
+      const element = node.nodeType === 3 ? node.parentElement : node
+      const editable = element && typeof element.closest === 'function' ? element.closest('[contenteditable="true"]') : null
+      const wrapper = editable && typeof editable.closest === 'function' ? editable.closest('.ce-block') : null
+      if (!editable || !wrapper) return null
+      const index = Array.prototype.indexOf.call(host.querySelectorAll('.ce-block'), wrapper)
+      const id = wrapper.getAttribute('data-id') || (wrapper.dataset ? wrapper.dataset.id : null)
+      if (index < 0 || !id) return null
+      return { wrapper, editable, id, index }
+    }
+
+    /**
+     * The MODEL block index one EDITOR block belongs to, or -1.
+     *
+     * Editor.js draws ONE `list` block for a RUN of consecutive list items, so the
+     * two index spaces diverge as soon as a list is in the document and a caret in
+     * the paragraph after it would otherwise be read as the wrong block. A list block
+     * answers -1, which is what makes "a size inside a list is refused" a fact rather
+     * than a wrong-block write: the list tool addresses its items by its own index,
+     * which this model does not carry.
+     *
+     * @param blocks - the model's blocks.
+     * @param editorIndex - the index among the rendered `.ce-block` elements.
+     * @returns the model index, or -1 (a list block, or past the end).
+     */
+    function modelIndexForEditorBlock(blocks, editorIndex) {
+      const list = Array.isArray(blocks) ? blocks : []
+      let editorAt = -1
+      let index = 0
+      while (index < list.length) {
+        const block = list[index]
+        if (!block || typeof block !== 'object') {
+          index += 1
+          continue
+        }
+        if (block.type === 'listItem') {
+          editorAt += 1
+          if (editorAt === editorIndex) return -1
+          const ordered = block.ordered === true
+          while (index < list.length && list[index].type === 'listItem' && (list[index].ordered === true) === ordered) index += 1
+          continue
+        }
+        editorAt += 1
+        if (editorAt === editorIndex) return index
+        index += 1
+      }
+      return -1
+    }
+
+    /** The Editor.js data one model block's runs make, for `blocks.update`. */
+    function blockUpdateData(block, runs) {
+      if (block && block.type === 'heading') {
+        const level = Number.isFinite(block.level) ? Math.max(1, Math.min(6, Math.round(block.level))) : 2
+        return { text: markHtml(normalizeRuns(runs)), level }
+      }
+      return { text: markHtml(normalizeRuns(runs)) }
+    }
+
+    /**
+     * The index of the block the caret is in, read from the DOM - the index the
+     * MODEL uses.
+     *
+     * Editor.js's own `getCurrentBlockIndex()` is the other candidate and it is not
+     * enough on its own: it is updated by the events the editor listens for, so a
+     * caret placed by a click on a toolbar control, by an arrow key the editor did
+     * not see, or by anything programmatic can leave it naming the block the person
+     * was in BEFORE - which would set a font on the wrong paragraph. The DOM says
+     * where the caret actually is, so the DOM is asked first and the editor's own
+     * answer is only the fallback for a caret this cannot see.
+     *
+     * @param host - the editor holder.
+     * @param editor - the Editor.js instance (its index is the fallback).
+     * @returns the block index, or -1.
+     */
+    function caretBlockIndex(host, editor) {
+      const selection = typeof window !== 'undefined' && window.getSelection ? window.getSelection() : null
+      if (host && selection && selection.rangeCount > 0) {
+        const node = selection.getRangeAt(0).startContainer
+        if (node && host.contains(node)) {
+          const element = node.nodeType === 3 ? node.parentElement : node
+          const editable = element && typeof element.closest === 'function' ? element.closest('[contenteditable="true"]') : null
+          const holder = editable && typeof editable.closest === 'function' ? editable.closest('.ce-block') : null
+          if (holder) {
+            const index = Array.prototype.indexOf.call(host.querySelectorAll('.ce-block'), holder)
+            if (index >= 0) return index
+          }
+        }
+      }
+      return editor && editor.blocks && typeof editor.blocks.getCurrentBlockIndex === 'function' ? editor.blocks.getCurrentBlockIndex() : -1
+    }
+
+    // -----------------------------------------------------------------------
     // Styles
     // -----------------------------------------------------------------------
     const CSS = `
@@ -1201,8 +1402,10 @@ window.__ModuleLoader__.load({
 .dsw-input{flex:1;min-width:0;height:24px;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l3);border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:11.5px;padding:0 6px;outline:none}
 .dsw-scroll{flex:1;min-width:0;overflow:auto;padding:16px 0 140px;background:var(--dsw-alias-bg-layer-1)}
 /* THE EDITOR SURFACE. The document is a column of blocks, not a sheet of paper:
-   its width is the page's content width in pixels and its typography is the
-   document's own, so what is on screen is what the .docx says. */
+   the column is as wide as THIS PANE (the block fills its scroll port, minus the
+   gutter) and its typography is the document's own scaled by the zoom, so the text
+   on screen is the text the .docx carries. The PAPER is the file's business: A4 and
+   its margins are what the codec writes and what LibreOffice lays out. */
 .dsw-editor{max-width:100%;margin:0 auto;padding:0 24px}
 .dsw-host{min-height:320px}
 .dsw-host[data-writing-editor='loading']{opacity:.6}
@@ -1667,6 +1870,38 @@ window.__ModuleLoader__.load({
         activeIndexRef.current = activeIndex
       }, [activeIndex])
 
+      /**
+       * Follow the CARET: which block it is in, and what run properties are declared
+       * around it.
+       *
+       * A `selectionchange` listener rather than Editor.js's own change event,
+       * because moving the caret with a click or an arrow is not an edit - and the
+       * bar's two controls have to answer to where the person IS, not to the last
+       * keystroke. The block index is read from the DOM (the element's own
+       * `.ce-block` among its siblings), which is the same index the model uses, so
+       * a caret in a block Editor.js did not report still names the right block.
+       */
+      useEffect(() => {
+        if (typeof document === 'undefined') return undefined
+        const read = () => {
+          const host = hostRef.current
+          if (!host) return
+          const index = caretBlockIndex(host, editorRef.current)
+          if (index < 0) return
+          setActiveIndex(index)
+          const current = liveRef.current ?? docRef.current
+          const block = current ? current.blocks[index] : null
+          if (!block) return
+          // What the caret CARRIES, read from the model at the caret's own offset -
+          // the same function the mark toolbar reads, so the two controls and the
+          // document cannot disagree about a run.
+          const editable = blockElementAt(host, index)
+          const offsets = editable ? caretOffsets(editable) : null
+          setActiveProperties(propertiesAt(block.runs, offsets ? offsets.start : runsLength(block.runs)))
+        }
+        document.addEventListener('selectionchange', read)
+        return () => document.removeEventListener('selectionchange', read)
+      }, [])
       /** Every document change goes through here, so the ref and the state cannot drift. */
       const applyDoc = useCallback((next) => {
         docRef.current = next
@@ -2089,12 +2324,18 @@ window.__ModuleLoader__.load({
             setExported(payload)
             if (proof) {
               const where = payload.dir ? ' to ' + payload.dir : ''
-              const opened = payload.previewPath ? openInPreview(payload.previewPath) : false
+              const previewed = payload.previewPath ? openInPreview(payload.previewPath) : false
+              const launched = payload.absolute ? await openInApp(payload.absolute) : false
               setStatus({
-                kind: opened ? 'info' : 'warn',
-                text: opened
-                  ? 'Exported ' + payload.name + where + ' \u2014 LibreOffice is rendering it in the right bar'
-                  : 'Exported ' + payload.name + where + (payload.previewPath ? ' (the right bar is not mounted, so nothing is rendering it)' : ' (nothing to render)'),
+                kind: previewed || launched ? 'info' : 'warn',
+                text:
+                  'Exported ' +
+                  payload.name +
+                  where +
+                  ' \u2014 ' +
+                  (previewed ? 'LibreOffice is rendering it in the right bar' : 'nothing in the right bar renders a .docx') +
+                  (launched ? ', and it is open in its own application' : previewed ? '' : '; open it from the Desktop to see it') +
+                  '.',
               })
             } else {
               setStatus({ kind: 'info', text: 'Exported ' + payload.name + (payload.dir ? ' to ' + payload.dir : '') })
@@ -2109,6 +2350,16 @@ window.__ModuleLoader__.load({
       )
 
       /** The kind the shipped document preview registered under, read from the registry. */
+      /**
+       * The kind the shipped document preview registered under, read from the
+       * registry - or NULL when this harness has no such tab type.
+       *
+       * NULL RATHER THAN A FALLBACK. The old answer was a hardcoded `text` kind,
+       * which handed a `.docx` to a text preview: the person clicked Proof and got
+       * a pane of binary noise, which is worse than no pane at all. A harness that
+       * does not register the preview says so in the status bar, and the file on the
+       * Desktop (and the application Proof opens) is what shows the export.
+       */
       const previewKind = useCallback(() => {
         const ctx = ctxRef.current
         try {
@@ -2118,19 +2369,36 @@ window.__ModuleLoader__.load({
             if (definition && definition.id === PREVIEW_TYPE_ID && typeof definition.kind === 'string') return definition.kind
           }
         } catch (err) {
-          /* fall through to the pinned line's kind */
+          /* no registry, or no such type: the caller needs to know */
         }
-        return PREVIEW_FALLBACK_KIND
+        return null
       }, [])
 
-      /** Open one exported workspace file in the shipped preview. */
+      /**
+       * Open one exported workspace file in the shipped preview, IN A COLUMN THE
+       * PERSON CAN SEE.
+       *
+       * `openResource` places the tab but does not show the column: a collapsed
+       * right bar would take the proof invisibly, which reads as "Proof did nothing"
+       * - the bug this fixed. The controller's own `isExpanded`/`toggleExpanded` is
+       * the only pair it publishes for that, so the column is expanded when it is
+       * not already showing.
+       *
+       * @param relativePath - the workspace copy the host wrote for rendering.
+       * @returns whether a preview was handed the file.
+       */
       const openInPreview = useCallback(
         (relativePath) => {
           const ctx = ctxRef.current
           const controller = ctx && typeof ctx.get === 'function' ? ctx.get(SIDEBAR_SERVICE) : undefined
           if (!controller || typeof controller.openResource !== 'function') return false
+          const kind = previewKind()
+          if (kind === null) return false
           try {
-            controller.openResource(FILE_ADDRESS_PREFIX + encodeURIComponent(session) + '/' + relativePath, { kind: previewKind() })
+            controller.openResource(FILE_ADDRESS_PREFIX + encodeURIComponent(session) + '/' + relativePath, { kind })
+            if (typeof controller.isExpanded === 'function' && typeof controller.toggleExpanded === 'function' && controller.isExpanded() !== true) {
+              controller.toggleExpanded()
+            }
             return true
           } catch (err) {
             return false
@@ -2138,6 +2406,31 @@ window.__ModuleLoader__.load({
         },
         [previewKind, session],
       )
+
+      /**
+       * Open one absolute path on THIS host in the application that owns it.
+       *
+       * The Remote FACE is resolved through `ctx.get('remote.session')` and never
+       * `ctx.remote`: touching a bare `ctx.remote` without inject throws, and a
+       * guard that swallows that throw reports "no such remote" on every reload -
+       * the trap `dsh-image` documents at its own read site. A failure here is not
+       * an error the person has to act on: the file is on the Desktop either way,
+       * and the status bar says so.
+       *
+       * @param absolutePath - the file the host just wrote.
+       * @returns whether the host opened it.
+       */
+      const openInApp = useCallback(async (absolutePath) => {
+        const ctx = ctxRef.current
+        const remote = ctx && typeof ctx.get === 'function' ? ctx.get('remote.session') : undefined
+        if (!remote || typeof remote.openWorkspacePath !== 'function') return false
+        try {
+          const result = await remote.openWorkspacePath({ path: absolutePath })
+          return Boolean(result && result.ok)
+        } catch (err) {
+          return false
+        }
+      }, [])
 
       // ---------------------------------------------------------------------
       // The page breaker module (fetched once, imported from a blob URL)
@@ -2417,7 +2710,11 @@ window.__ModuleLoader__.load({
           }
 
           static get sanitize() {
-            return { text: { br: true, span: { 'data-mark': true, style: true }, b: true, i: true, u: true, s: true, code: true } }
+            // `data-size` and `data-font` are named HERE or Editor.js's save-time
+            // sanitizer drops them with the style attribute - see `runAttributes`.
+            return {
+              text: { br: true, span: { 'data-mark': true, 'data-size': true, 'data-font': true, style: true }, b: true, i: true, u: true, s: true, code: true },
+            }
           }
 
           static get toolbox() {
@@ -2596,7 +2893,14 @@ window.__ModuleLoader__.load({
             shownIdRef.current = doc.id
             try {
               setEditorState('rendering')
-              await editorRef.current.render(toEditorData(doc))
+              // `editor.blocks.render(data)`, NOT `editor.render(data)`: the
+              // instance-level `render` was removed from Editor.js in 2.30 and the
+              // pin here is 2.31.7, so the old call threw
+              // "editor.render is not a function" on the FIRST mount (the
+              // constructor had already drawn the blocks, which is why the tab
+              // looked fine while the status bar carried that error) and every
+              // later document switch left the previous document on screen.
+              await renderIntoEditor(editorRef.current, toEditorData(doc))
               if (!cancelled) {
                 liveRef.current = doc
                 setEditorState('ready')
@@ -2691,6 +2995,149 @@ window.__ModuleLoader__.load({
         [applyDoc],
       )
 
+      /**
+       * Set one run property - the family or the size - on the SELECTION, or on the
+       * whole block the caret is in when nothing is selected.
+       *
+       * EDITOR.JS OWNS THE WRITE, and that is the whole design. A family and a size
+       * are run properties (the `.docx` writes `w:rFonts`/`w:sz` per `<w:r>`), so
+       * `applyAttributeToRuns` decides the range - and the result goes back through
+       * `blocks.update(id, data)`, Editor.js's own way to change one block. Two
+       * alternatives were tried against a real browser and both failed for a reason
+       * worth keeping: wrapping spans in the DOM by hand left Editor.js's cached block
+       * data stale, so the next repaint silently put the run's own size back; and
+       * re-rendering the whole document (`blocks.render`) is what this pin answers
+       * with "Can't find a Block to remove" and a half-cleared redactor. Going through
+       * `blocks.update` means the editor's data and the DOM move together, and the
+       * MODEL follows the editor (`syncFromEditor`) exactly as it does for typing.
+       *
+       * A COLLAPSED CARET MEANS THE BLOCK: a size typed with the caret in a
+       * paragraph and nothing selected sets that paragraph, which is the useful
+       * reading of "make this line bigger" and is said out loud in the status bar.
+       *
+       * @param key - `'font'` or `'size'`.
+       * @param value - the family name, the size in points, or null to clear.
+       * @returns whether anything was written.
+       */
+      const applyTypographyToSelection = useCallback(
+        async (key, value) => {
+          const editor = editorRef.current
+          const host = hostRef.current
+          const current = liveRef.current ?? docRef.current
+          if (!editor || !host || !current) {
+            // NAMED, never silent: a control that changes nothing and says nothing
+            // reads as a broken button.
+            setStatus({ kind: 'warn', text: 'The editor is not ready yet \u2014 try again in a moment.' })
+            return false
+          }
+          const target = caretTarget(host)
+          if (!target) {
+            setStatus({ kind: 'warn', text: 'Put the caret in some text first.' })
+            return false
+          }
+          const modelIndex = modelIndexForEditorBlock(current.blocks, target.index)
+          if (modelIndex < 0) {
+            setStatus({
+              kind: 'warn',
+              text: 'A list is the vendored list tool\u2019s block: its items are addressed by the editor\u2019s own index, so a font or size cannot be set inside one from here.',
+            })
+            return false
+          }
+          const block = current.blocks[modelIndex]
+          if (!block || block.type === 'pageBreak') {
+            setStatus({ kind: 'warn', text: 'Put the caret in some text first.' })
+            return false
+          }
+          if (block.type === 'code') {
+            setStatus({ kind: 'warn', text: 'A code block carries no runs, so it has no font or size of its own.' })
+            return false
+          }
+          // A QUOTE IS REFUSED RATHER THAN SILENTLY LOST. The vendored quote tool
+          // declares `sanitize: { text: { br: true } }` - its own save strips every
+          // other attribute - so a family or size set inside a quote would ride in the
+          // model until the next save and then vanish, which is the worst of both
+          // answers. The refusal names that; this package's own paragraph and header
+          // tools keep the attributes their own sanitize config names.
+          if (block.type === 'quote') {
+            setStatus({
+              kind: 'warn',
+              text: 'A quote is the vendored quote tool\u2019s block: it keeps text only, so a font or size set here would be dropped at the next save.',
+            })
+            return false
+          }
+          // The runs come from the EDITOR's own HTML - the same text the debounced
+          // model read would take - so a run the person just typed is part of the
+          // range even if the model has not caught up yet.
+          const runs = runsFromHtmlString(target.editable.innerHTML)
+          const offsets = caretOffsets(target.editable)
+          const length = runsLength(runs)
+          const collapsed = offsets === null || offsets.start === offsets.end
+          // WHERE THE CARET WAS, before the range is re-interpreted as the block: a
+          // collapsed caret is restored where the person left it, and a selection is
+          // kept selected so what was just sized is still visibly the target.
+          const caretAt = offsets ? offsets.start : length
+          const start = collapsed ? 0 : Math.min(offsets.start, length)
+          const end = collapsed ? length : Math.min(offsets.end, length)
+          if (end <= start) {
+            setStatus({ kind: 'warn', text: 'This block is empty - type something to give it a size.' })
+            return false
+          }
+          const next = applyAttributeToRuns(block.runs ?? [], start, end, key, value)
+          const blocks = current.blocks.map((entry, at) => (at === modelIndex ? { ...entry, runs: next } : entry))
+          const document = { ...current, blocks }
+          liveRef.current = document
+          applyDoc(document)
+          setDirty(true)
+          dirtyRef.current = true
+          // THE EDITOR IS REBUILT FROM THE MODEL, which is the one path this pinned
+          // Editor.js has been measured to draw a whole document through - the same
+          // one the tab opens a document with. Three other ways were tried against a
+          // real browser and each is written down here so nobody repeats them:
+          //   - `editor.blocks.render(data)` APPENDS in 2.31.7 once the redactor has
+          //     been touched: its `clear()` fails with "Can't find a Block to remove"
+          //     and the document is duplicated block for block;
+          //   - `editor.blocks.update(id, data)` composes a new block and INSERTS it,
+          //     so the change lands as a second block at the end;
+          //   - writing the block's `innerHTML` by hand is undone a few frames later,
+          //     when Editor.js repaints that block from the data it still holds.
+          // A fresh instance starts from the model and therefore cannot disagree with
+          // it - and `destroy()` is guarded because Editor.js throws on a double one.
+          try {
+            if (editor && typeof editor.destroy === 'function') editor.destroy()
+          } catch (err) {
+            /* an instance that will not die is replaced anyway */
+          }
+          editorRef.current = null
+          // Editor.js leaves its DOM behind when an instance is replaced (and its own
+          // `destroy()` is not a guarantee that the holder is empty), so the holder is
+          // cleared before the next instance mounts into it.
+          if (hostRef.current) hostRef.current.innerHTML = ''
+          buildEditor()
+          // The caret goes back as soon as the rebuilt editor has drawn the block. This
+          // POLLS rather than awaiting the instance's own `isReady`: a second instance
+          // in the same holder has been measured to leave that promise unsettled, and an
+          // await on it would strand the write half-finished (the model is already
+          // written; only the caret is at stake).
+          const restoreCaret = (attempt) => {
+            const painted = blockElementAt(hostRef.current, target.index)
+            if (painted) {
+              setCaretOffsets(painted, start, collapsed ? caretAt : end)
+              return
+            }
+            if (attempt < 24 && typeof window !== 'undefined') window.setTimeout(() => restoreCaret(attempt + 1), 25)
+          }
+          restoreCaret(0)
+          // What the selection now carries, so the two controls agree with the model
+          // the moment the property lands rather than at the next caret move.
+          setActiveProperties(propertiesAt(next, collapsed ? caretAt : start))
+          const named = key === 'size' ? (value === null ? 'the document\u2019s size' : Number(value) + 'pt') : value === '' || value === null ? 'the document\u2019s font' : String(value)
+          setStatus({ kind: 'info', text: 'Set ' + named + ' on ' + (collapsed ? 'this block' : 'the selection') + '.' })
+          return true
+        },
+        [applyDoc],
+      )
+
+
       /** This document's headings, for the navigator. */
       const headings = useMemo(() => {
         if (!doc) return []
@@ -2752,37 +3199,33 @@ window.__ModuleLoader__.load({
       )
 
       /**
-       * The document's own geometry: the page's CONTENT width in pixels and its
-       * typography. The paper is not drawn any more, but this measure is the one the
-       * `.docx` will use, so the editor's column is that wide and what is on screen
-       * is what gets printed.
+       * The editor column's own style: the document's type, scaled by the zoom,
+       * with NO width of its own.
+       *
+       * THE COLUMN ALWAYS FILLS THE PANE. It used to be capped at the page's
+       * content width (A4 with 25.4mm margins is 602px, a narrow ribbon in a wide
+       * window), and the zoom multiplied that cap - so at 100% the column was a
+       * column, and at 200% it finally looked like a document editor. That is
+       * backwards: the person is reading on the screen they have, so the width is
+       * the PANE's (the block is as wide as its scroll port, minus the 24px
+       * gutter) and the ZOOM scales the TYPE instead - which is what a zoom does
+       * everywhere else in this app.
+       *
+       * What the page still decides is the `.docx`: its paper and margins are
+       * written by the codec, and the page's own content width is what LibreOffice
+       * lays the text out in. The column is the pane; the file is the page.
        */
-      const geometry = useMemo(() => {
-        const page = doc && doc.page ? doc.page : { size: 'a4', orientation: 'portrait', margins: { top: 25.4, right: 25.4, bottom: 25.4, left: 25.4 } }
-        const SIZES = { a4: { width: 210, height: 297 }, letter: { width: 215.9, height: 279.4 } }
-        const size = SIZES[page.size] ?? SIZES.a4
-        const landscape = page.orientation === 'landscape'
-        const widthMm = landscape ? size.height : size.width
-        const heightMm = landscape ? size.width : size.height
-        const margins = page.margins ?? { top: 25.4, right: 25.4, bottom: 25.4, left: 25.4 }
-        return {
-          widthMm,
-          heightMm,
-          margins,
-          contentWidthMm: Math.max(10, widthMm - margins.left - margins.right),
-        }
-      }, [doc])
-
-      /** The editor column's own style: the page's width, the document's type. */
       const columnStyle = useMemo(() => {
-        const width = Math.round(geometry.contentWidthMm * (96 / 25.4))
-        const style = { maxWidth: Math.round(width * zoom) + 'px' }
+        const style = {}
         if (doc && typeof doc.font === 'string' && doc.font.length > 0) style.fontFamily = styleFamily(doc.font)
         // A size is always written: it is what everything on screen inherits, and
-        // leaving it off would make the document's own size invisible.
-        style.fontSize = (doc && Number.isFinite(doc.fontSize) ? doc.fontSize : 12) + 'pt'
+        // leaving it off would make the document's own size invisible. Half-point
+        // granularity, because that is what `w:sz` carries and what the model
+        // rounds to - a zoomed size no `.docx` could hold would be a lie on screen.
+        const size = doc && Number.isFinite(doc.fontSize) ? doc.fontSize : 12
+        style.fontSize = Math.round(size * zoom * 2) / 2 + 'pt'
         return style
-      }, [doc, geometry.contentWidthMm, zoom])
+      }, [doc, zoom])
 
       /** The block type of the block the caret is in, for the status bar. */
       const activeBlock = useMemo(() => {
@@ -2872,15 +3315,20 @@ window.__ModuleLoader__.load({
         // THE FONTS THIS MACHINE HAS. The list is a `<datalist>`, so it filters
         // as the name is typed: a Windows box with 234 families is a list nobody
         // scrolls through, and a typed prefix is how you find one.
+        // THE TWO CONTROLS SET THE SELECTION, NOT THE DOCUMENT. The document's own
+        // family and size live in the Document menu (`Document font`, `Document
+        // size`) and are what every run inherits; these two say what THIS range
+        // carries, which is what a person means when they select a phrase and reach
+        // for a size. Emptying either clears the property back to the document's.
         h('input', {
           className: 'dsw-font',
           'data-writing-font': true,
           list: 'dsw-fontFamilies',
-          placeholder: 'Font',
-          title: fontsNote || 'The fonts installed on this machine',
-          value: doc ? doc.font ?? '' : '',
+          placeholder: doc && doc.font ? doc.font : 'Font',
+          title: 'The font of the selection \u2014 with nothing selected, of the block the caret is in. The Document menu sets the document\u2019s own font.',
+          value: activeProperties.font,
           disabled: !doc,
-          onChange: (event) => setDocumentTypography({ font: event.target.value }),
+          onChange: (event) => void applyTypographyToSelection('font', event.target.value),
         }),
         h(
           'datalist',
@@ -2894,11 +3342,11 @@ window.__ModuleLoader__.load({
           min: '4',
           max: '400',
           step: '0.5',
-          title: 'The document\u2019s size in points \u2014 what every run inherits',
-          value: doc ? doc.fontSize : '',
-          placeholder: '12',
+          title: 'The size of the selection in points \u2014 with nothing selected, of the block the caret is in. Empty it to go back to the document\u2019s size.',
+          value: Number.isFinite(activeProperties.size) ? activeProperties.size : doc ? doc.fontSize : '',
+          placeholder: doc ? String(doc.fontSize) : '12',
           disabled: !doc,
-          onChange: (event) => setDocumentTypography({ fontSize: Number(event.target.value) }),
+          onChange: (event) => void applyTypographyToSelection('size', Number(event.target.value)),
         }),
         h(
           ToolButton,
@@ -3047,7 +3495,7 @@ window.__ModuleLoader__.load({
             {
               className: 'dsw-select',
               'data-writing-zoom': true,
-              title: 'How wide the editor column is drawn',
+              title: 'How large the type is drawn — the column always fills the pane',
               value: String(zoom),
               onChange: (event) => setZoom(Number(event.target.value)),
             },
@@ -3729,7 +4177,11 @@ window.__ModuleLoader__.load({
         [session],
       )
 
-      /** The kind the shipped preview registered: where Proof renders this file. */
+      /**
+       * The kind the shipped preview registered: where Proof renders this file, or
+       * null when this harness has no such tab type (never a hardcoded `text` kind,
+       * which would hand a workbook to a text preview).
+       */
       const previewKind = useCallback(() => {
         const ctx = ctxRef.current
         try {
@@ -3739,9 +4191,9 @@ window.__ModuleLoader__.load({
             if (definition && definition.id === PREVIEW_TYPE_ID && typeof definition.kind === 'string') return definition.kind
           }
         } catch (err) {
-          /* fall through */
+          /* no registry, or no such type */
         }
-        return PREVIEW_FALLBACK_KIND
+        return null
       }, [])
 
       /** Write the file, then let core's own preview render it with LibreOffice. */
@@ -3753,12 +4205,16 @@ window.__ModuleLoader__.load({
         if (!ok) return
         const ctx = ctxRef.current
         const controller = ctx && typeof ctx.get === 'function' ? ctx.get(SIDEBAR_SERVICE) : undefined
-        if (!controller || typeof controller.openResource !== 'function') {
-          setStatus({ kind: 'warn', text: 'Wrote ' + origin.path + ' (the right bar is not mounted)' })
+        const kind = previewKind()
+        if (!controller || typeof controller.openResource !== 'function' || kind === null) {
+          setStatus({ kind: 'warn', text: 'Wrote ' + origin.path + ' \u2014 this harness has no office preview to render it with' })
           return
         }
         try {
-          controller.openResource(FILE_ADDRESS_PREFIX + encodeURIComponent(session) + '/' + origin.path, { kind: previewKind() })
+          controller.openResource(FILE_ADDRESS_PREFIX + encodeURIComponent(session) + '/' + origin.path, { kind })
+          if (typeof controller.isExpanded === 'function' && typeof controller.toggleExpanded === 'function' && controller.isExpanded() !== true) {
+            controller.toggleExpanded()
+          }
           setStatus({ kind: 'info', text: 'Wrote ' + origin.path + ' \u2014 LibreOffice is rendering it' })
         } catch (err) {
           setStatus({ kind: 'warn', text: 'Wrote ' + origin.path })
@@ -4212,6 +4668,7 @@ window.__ModuleLoader__.load({
       propertiesAt,
       applyMarkToRuns,
       applyAttributeToRuns,
+      blockElementAt,
       splitRunsAt,
       mergeRuns,
       runHtml,

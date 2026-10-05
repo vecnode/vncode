@@ -1294,7 +1294,8 @@ check('  ...named research', skill.name, 'research')
 check('  ...with a description the model can choose on', typeof skill.description === 'string' && skill.description.length > 200, true)
 check('  ...and a whenToUse', typeof skill.whenToUse === 'string' && skill.whenToUse.length > 40, true)
 check('  ...registered from its own file', typeof skill.path === 'string' && existsSync(skill.path), true)
-check('  ...carrying the rule a review lives by', String(skill.content).includes('No identifier you have not fetched'), true)
+check('  ...carrying the rule a review lives by', String(skill.content).includes('No identifier and no link you have not fetched'), true)
+check('  ...and the rule that every reference carries a link', /Every reference carries a link/.test(String(skill.content)) || /every reference carries a link/i.test(String(skill.content)), true)
 check('  ...and the step that writes the document', String(skill.content).includes('writing_write'), true)
 // Every reference file the skill names must be there: a skill that points at a
 // document it does not ship sends the agent into an empty read.

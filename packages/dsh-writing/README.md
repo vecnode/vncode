@@ -1,4 +1,4 @@
-# dsh-writing (alpha.5)
+# dsh-writing (alpha.6)
 
 **A document you write on and a workbook you edit, in the harness's own surfaces.**
 The **Writing** tab sits in the chat panel's view ring to the right of Canvas; the
@@ -43,14 +43,17 @@ verified, synthesized and cited — and it ships here because the artifact a rev
 produces is the artifact this tab makes, and because its last step is a
 `writing_write` call.
 
-Its one rule is the one a review lives by: **no identifier you have not fetched.**
-A DOI, a venue, a year or an author list that did not come off a page that was
-actually loaded does not go in the document. It carries two reference files —
-`reference/search.md` (query ladders, venue families, snowballing, and how to read
-a publisher page) and `reference/citations.md` (IEEE reference forms, the receipt
-to record per source, retraction and predatory-venue checks) — and
-`check-writing-node.mjs` asserts the registration parses, the rule survives, and
-every reference file it names is shipped.
+Its one rule is the one a review lives by: **no identifier and no link you have not
+fetched.** A DOI, a venue, a year, an author list or a URL that did not come off a
+page that was actually loaded does not go in the document — and **every reference
+carries the link it was read from**, with the checks to re-resolve it before the
+document is final (`https://doi.org/…`, the publisher's landing page, the arXiv
+abstract page; never a search result, a mirror or a PDF somebody re-uploaded). It
+carries two reference files — `reference/search.md` (query ladders, venue families,
+snowballing, and how to read a publisher page) and `reference/citations.md` (IEEE
+reference forms with their links, the receipt to record per source, the link checks,
+retraction and predatory-venue checks) — and `check-writing-node.mjs` asserts the
+registration parses, the rule survives, and every reference file it names is shipped.
 
 ## It edits in a vendored Editor.js
 
@@ -76,10 +79,38 @@ a code block.
   the loss banner answer to what has been typed. **Save** reads the editor's own
   `saver.save()` first, so a keystroke that has not reached the model yet is still a
   keystroke somebody made.
-- **The document's own typography is the editor's typography.** A family and a size
-  belong to the document (the Document menu and the two controls on the bar), and
-  they are applied to the editor's column, which is as wide as the page's content
-  width — so what is on screen is what the `.docx` will say. Zoom widens that column.
+- **The column always fills the pane, and the zoom scales the type.** The editor used
+  to be capped at the page's content width — A4 with 25.4mm margins is 602px, a ribbon
+  in a wide window — and the zoom multiplied that cap, so 100% looked like a column and
+  200% finally looked like a document editor. That was backwards: the width is the
+  PANE's (minus a 24px gutter) at every zoom, and the zoom ladder scales the TYPE in
+  it, which is what a zoom does everywhere else in this app. The PAPER is still the
+  file's business: A4 and its margins are what the codec writes.
+- **A family and a size belong to a RANGE, and the bar's two controls set the
+  selection.** Selecting a phrase and typing a size gives that phrase its own
+  `w:rFonts`/`w:sz` — the same run properties a `.docx` carries per run — while the
+  Document menu's `Document font` / `Document size` set what every run inherits.
+  Emptying either control clears the run's own value back to the document's. With a
+  collapsed caret the write means **the block the caret is in**, which is the useful
+  reading of "make this line bigger" and is named in the status line.
+- **A run's own typography rides as data, and that is why it survives.** A size is
+  written as `data-size="18"` beside `style="font-size:18pt"`, and a family as
+  `data-font` beside the style, because **Editor.js's saver sanitizes what it saves**:
+  it keeps the `data-*` attributes a tool's `sanitize` config names and drops the
+  `style` attribute. A size written only as a style survived the paint and was gone by
+  the next model read — measured in `check-writing-browser.mjs`, which now asserts the
+  round trip (paint, write, editor save, model) end to end.
+- **The editor is rebuilt from the model for a run-property write.** Three other ways
+  were tried against a real browser and each is recorded in `lib/client.js` so nobody
+  repeats them: `blocks.render` appends once the redactor has been touched,
+  `blocks.update` inserts instead of replacing, and writing a block's `innerHTML` by
+  hand is undone a few frames later when Editor.js repaints it from the data it still
+  holds. A fresh instance built from the model cannot disagree with it.
+- **Editor.js's API is not there at construction.** 2.31.7 installs `blocks`/`render`/
+  `save` onto the instance only when its own `isReady` promise resolves, so everything
+  that reaches into the instance waits for it — without that, the first render threw
+  `editor.render is not a function` and **switching documents left the previous one on
+  screen**, which the browser check now covers.
 - **New is one button and one keystroke.** It is the leftmost control on the bar and
   it makes the thing this tab makes: a real `.docx` on the Desktop. It opens the tab's
   own dialog (never the browser's prompt), the suggested name is selected so typing
@@ -155,11 +186,15 @@ a code block.
   the GRID rather than in the shipped preview's spreadsheet view — deliberately,
   because the point is to edit it, and the pane's own **Proof** renders the workbook
   it writes with that same preview in one click.
-- **Proof is core's LibreOffice.** The button writes the `.docx` to the Desktop and
-  hands the preview a workspace copy of it (whose kind is read out of the tab
-  registry, never hardcoded), and that preview converts and paints it. The tab
-  composes the file; core shows what LibreOffice makes of it. The sheet pane's own
-  Proof does the same for a workbook.
+- **Proof is core's LibreOffice, and it SHOWS you the result.** The button writes the
+  `.docx` to the Desktop, hands the preview a workspace copy of it (whose kind is read
+  out of the tab registry — never a hardcoded `text` kind, which used to hand a `.docx`
+  to a text preview and paint binary noise), **expands the right bar when it is
+  collapsed** so the rendered document is actually visible instead of opening into a
+  hidden column, and **opens the Desktop file in whatever application owns a `.docx`**
+  through the harness's own open-in-app path. The status line names each of the three
+  outcomes truthfully. The tab composes the file; core shows what LibreOffice makes of
+  it. The sheet pane's own Proof does the same for a workbook.
 - **Import** `.docx`, `.xlsx`, `.md`, `.txt`; **export** `.docx`, `.md`, `.txt` (and
   a workbook as `.xlsx`). `.doc`, `.odt`, `.rtf`, `.xls` and `.ods` are refused WITH
   the way out ("open it in LibreOffice or Word and save it as .docx"), because that
@@ -224,9 +259,17 @@ path, never a root.
 - **Inline marks are attribute-based, so a paste can lose one.** The pack's own
   tools round trip all six marks; a mark Editor.js's stock tools do not know comes
   back as text, and the banner says so.
-- **Per-run font and size do not survive an edit.** They ride in the model and in
-  the `.docx`, and they are applied on screen; a run that names its own family or
-  size is reported as a counted loss, because Editor.js's tools hold text.
+- **Per-run typography is written in this package's own tools, and refused where it
+  cannot live.** The paragraph and header tools carry a run's family and size (as
+  `data-font`/`data-size` plus the inline style) and survive an edit; **a list and a
+  quote refuse the write with a named reason** rather than losing it later — the list
+  tool addresses its items by the editor's own index, which this model does not carry,
+  and the vendored quote tool declares `sanitize: { text: { br: true } }`, so its own
+  save strips every other attribute. A code block carries no runs at all. The status
+  line says which of those happened, so the refusal is never silent.
+- **On the line width.** The column is the pane's width, so a line breaks where the
+  screen breaks it, not where the printed page would. The type, the sizes and the
+  marks are the document's; the wrap is the window's.
 - **The block menu is Editor.js's, so a `pageBreak` is shown as a separator.** A
   document imported from a `.docx` with a page break keeps it in the model (and in
   the file it writes), and the banner says it cannot be drawn as a page.
@@ -287,12 +330,29 @@ rendering a marked run, the document arriving in the editor block for block, and
 **Save** reading the editor and posting that document back. With no Chromium-family
 browser it skips loudly and exits 0.
 
+It also drives the four behaviours that only exist once a page has run them, each
+measured rather than assumed:
+
+- **the column is as wide as its pane** (its own scroll port) at 100%, and the zoom
+  ladder doubles the TYPE without widening the column past the pane;
+- **a size set on a selection** lands in the DOM as a sized span, keeps the
+  selection, survives Editor.js's own save as a run with `size: 18` in the model, and
+  leaves the block next door untouched — while a **collapsed caret sizes the whole
+  block**;
+- **a quote is refused**, and nothing inside it carries a size afterwards;
+- **Proof** hands the workspace copy to the preview under the KIND the registry
+  names, expands the collapsed right bar, and opens the Desktop file in its own
+  application.
+
 **The gap that is left, stated rather than hidden:** synthetic typing does not reach
 Editor.js's change event in a headless page (it defers that event to a
 `requestIdleCallback`, which a page that never paints does not reliably run), so the
 "typing updates the model" path is covered by the pure checks above and by the
 person, not by the browser check. It is the first thing to add when a real typing
-harness is worth the machinery.
+harness is worth the machinery. The same page is also why the check calls a control's
+`onChange` through the props React put on the element when the synthetic `input`
+event does not reach it: what runs is the shipped handler either way, and it is
+called exactly once.
 
 ## Install
 

@@ -6805,7 +6805,16 @@ check('...and the vendored routes went with them', Object.values(canvasInternals
     JSON.stringify(markRuns),
   )
   check('markHtml stamps the mark attribute', io.markHtml([{ text: 'x', marks: ['u'] }]), '<span data-mark="u">x</span>')
-  check('markHtml keeps a font on a style', io.markHtml([{ text: 'x', marks: [], font: 'Georgia', size: 14 }]), "<span style=\"font-family:'Georgia';font-size:14pt\">x</span>")
+  // A run's own family and size are written TWICE on purpose: as the `data-*`
+  // attributes the model reads back (Editor.js's save-time sanitizer keeps the
+  // attributes a tool's config names and drops the style) and as the inline style the
+  // browser draws. check-writing-browser.mjs proves the round trip through the editor.
+  check(
+    'markHtml carries a font and size as data AND paint',
+    io.markHtml([{ text: 'x', marks: [], font: 'Georgia', size: 14 }]),
+    '<span data-font="Georgia" data-size="14" style="font-family:\'Georgia\';font-size:14pt">x</span>',
+  )
+  check('markHtml carries a size alone as data AND paint', io.markHtml([{ text: 'x', marks: [], size: 14 }]), '<span data-size="14" style="font-size:14pt">x</span>')
   check('markHtml turns a soft break into a br', io.markHtml([{ text: 'a\nb', marks: [] }]), 'a<br>b')
   check('markHtml gives an empty block a break', io.markHtml([]), '<br>')
   check('markHtml escapes the text', io.markHtml([{ text: '<b> & </b>', marks: [] }]), '&lt;b&gt; &amp; &lt;/b&gt;')

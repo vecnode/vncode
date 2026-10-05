@@ -1,6 +1,6 @@
 {
   "name": "dsh-writing",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "description": "Writing: a document tab for the conversation's own documents - a vendored Editor.js surface over a persistent store, three `writing_*` tools so the agent writes the same documents the person edits, the research skill this pack ships, and the .docx codec this package owns with the harness's own LibreOffice as the proof renderer. See packages/dsh-writing/README.md.",
   "type": "module",
   "main": "lib/index.js",

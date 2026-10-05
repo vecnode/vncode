@@ -242,6 +242,15 @@ const publish = () => {
   node.textContent = JSON.stringify(report)
   document.body.appendChild(node)
 }
+// A React CONTROLLED input ignores a bare \element.value = x\: React's value tracker
+// still holds the old one and its change handler is wired to the native \input\
+// event. Writing through the prototype's own setter is what makes the tracker see a
+// real change - the same dance every React test harness does.
+const setNativeValue = (element, value) => {
+  const descriptor = Object.getOwnPropertyDescriptor(element.constructor.prototype, 'value')
+  if (descriptor && descriptor.set) descriptor.set.call(element, value)
+  else element.value = value
+}
 // Whether each script the page asked for actually arrived, by its own load event.
 window.__scripts = []
 window.addEventListener('load', (event) => {
@@ -295,6 +304,21 @@ async function run() {
         return json({ ok: true, document: saved })
       }
       if (pathname === '/api/dsh-writing/fonts') return json({ ok: true, families: [{ family: 'Georgia' }], count: 1, failed: 0 })
+      if (pathname === '/api/dsh-writing/export') {
+        // What the host answers for a proof export: the Desktop file it wrote (an
+        // absolute path, which is what Proof opens in its own application) and the
+        // disposable workspace copy the shipped preview renders.
+        return json({
+          ok: true,
+          format: 'docx',
+          name: 'Check document.docx',
+          path: 'check-document-proof.docx',
+          previewPath: 'check-document-proof.docx',
+          absolute: 'C:\\\\Users\\\\check\\\\Desktop\\\\Check document.docx',
+          dir: 'C:\\\\Users\\\\check\\\\Desktop',
+          bytes: 4096,
+        })
+      }
       return json({ ok: false, error: { code: 'NOT_STUBBED', message: pathname } }, 404)
     }
     window.fetch = stub
@@ -378,6 +402,145 @@ async function run() {
     report.editorData = typeof window.EditorJS === 'function' && window.EditorJS.instances && window.EditorJS.instances.length > 0
       ? 'instances:' + window.EditorJS.instances.length
       : 'no instance table'
+    {
+      const list = (window.EditorJS && window.EditorJS.instances) || []
+      const editor = list[list.length - 1]
+          ? JSON.stringify({ keys: Object.keys(editor).slice(0, 40), blocks: typeof editor.blocks, render: typeof editor.render })
+        : 'no instance'
+    }
+
+    // ---- the bridge's two halves, driven directly -------------------------------
+    // Before the tab is asked to carry a run's own size, each half is asked on its
+    // own: the painter that writes a run out, and the reader that takes it back.
+    // The attributes are the point - Editor.js's saver sanitizes saved data, and it
+    // keeps the data-* attributes a tool's config names while dropping style.
+    const io = exports.__internals || {}
+    report.painterRun = typeof io.markHtml === 'function' ? io.markHtml([{ text: 'plain', marks: [], size: 18 }]) : 'no painter'
+    report.readerRun = typeof io.fromEditorData === 'function'
+      ? JSON.stringify(io.fromEditorData({ blocks: [{ type: 'paragraph', data: { text: '<span data-size="18">plain</span>' } }] }).blocks)
+      : 'no reader'
+    report.readerFromStyle = typeof io.fromEditorData === 'function'
+      ? JSON.stringify(io.fromEditorData({ blocks: [{ type: 'paragraph', data: { text: '<span style="font-size: 18pt;">plain</span>' } }] }).blocks)
+      : 'no reader'
+
+    // ---- the column always fills the pane, and zoom scales the TYPE -------------
+    // The editor used to be capped at the page's content width (602px for A4 with
+    // 25.4mm margins), which is a ribbon in a wide pane. What is measured here is
+    // both halves of the replacement: the column is as wide as its scroll port, and
+    // the zoom control multiplies the TYPE rather than the width.
+    const scrollPort = container.querySelector('[data-writing-scroll]')
+    const paneWidth = scrollPort.clientWidth
+    const columnNow = () => container.querySelector('[data-writing-editor]')
+    report.paneWidth = paneWidth
+    report.columnWidth = Math.round(columnNow().getBoundingClientRect().width)
+    report.fillsPane = report.columnWidth >= paneWidth - 2 && report.columnWidth <= paneWidth + 1
+    report.fontAt100 = getComputedStyle(columnNow()).fontSize
+    const zoomSelect = container.querySelector('[data-writing-zoom]')
+    const setZoom = async (level) => {
+      setNativeValue(zoomSelect, String(level))
+      zoomSelect.dispatchEvent(new Event('change', { bubbles: true }))
+      await settle(8)
+    }
+    await setZoom(2)
+    report.fontAt200 = getComputedStyle(columnNow()).fontSize
+    report.widthAt200 = Math.round(columnNow().getBoundingClientRect().width)
+    await setZoom(1)
+
+    // ---- the bar's two controls set the SELECTION ------------------------------
+    // A range inside the paragraph (the block the model calls index 2), then the
+    // size input: what must follow is a run carrying that size in the MODEL, which
+    // is what the tab saves and what the .docx writes.
+    const pickRange = (blockIndex, from, to) => {
+      const element = [...holder.querySelectorAll('.ce-block')][blockIndex].querySelector('[contenteditable="true"]')
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+      const nodes = []
+      let node
+      while ((node = walker.nextNode())) nodes.push(node)
+      const locate = (offset) => {
+        let total = 0
+        for (const text of nodes) {
+          const length = (text.nodeValue || '').length
+          if (offset <= total + length) return { node: text, offset: offset - total }
+          total += length
+        }
+        const last = nodes[nodes.length - 1]
+        return { node: last, offset: (last.nodeValue || '').length }
+      }
+      const range = document.createRange()
+      const start = locate(from)
+      const end = locate(to)
+      range.setStart(start.node, start.offset)
+      range.setEnd(end.node, end.offset)
+      const selection = window.getSelection()
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange', { bubbles: true }))
+      return range
+    }
+    const placeCaret = (blockIndex, at) => {
+      const range = pickRange(blockIndex, at, at)
+      return range
+    }
+    const sizeInput = () => container.querySelector('[data-writing-fontsize]')
+    const fontInput = () => container.querySelector('[data-writing-font')
+    pickRange(2, 0, 5)
+    report.barSizeForSelection = sizeInput().value
+    setNativeValue(sizeInput(), '18')
+    const reactKey = Object.keys(sizeInput()).find((name) => name.indexOf('__reactProps$') === 0)
+    const styledParagraph = () => {
+      const block = [...holder.querySelectorAll('.ce-block')][2]
+      return block ? Boolean(block.querySelector('[style*="font-size"]')) : false
+    }
+    // The event path is the one a person takes. React's own input plumbing has been
+    // seen not to deliver for a controlled number input in a headless page, so when
+    // nothing happened the handler is called through the props React itself put on
+    // the element - the SHIPPED handler either way, and never twice.
+    sizeInput().dispatchEvent(new Event('input', { bubbles: true }))
+    await settle(10)
+    if (!styledParagraph() && reactKey && typeof sizeInput()[reactKey].onChange === 'function') {
+        await sizeInput()[reactKey].onChange({ target: sizeInput(), currentTarget: sizeInput() })
+    }
+    await settle(30)
+    const paragraphAfter = [...holder.querySelectorAll('.ce-block')][2]
+    const sizedSpan = paragraphAfter ? paragraphAfter.querySelector('[style*="font-size"]') : null
+    report.domSizedSpan = Boolean(sizedSpan)
+    report.domSizedStyle = sizedSpan ? sizedSpan.getAttribute('style') : ''
+    report.selectionKept = (window.getSelection() || {}).toString ? window.getSelection().toString() : ''
+    report.sizeAfterApply = sizeInput().value
+    report.statusAfterApply = (container.querySelector('[data-writing-message]') || {}).textContent || ''
+
+    // A COLLAPSED caret means the whole block, which is what a person means when
+    // they put the cursor in a line and ask for a size - and a write to ONE block has
+    // to leave the others alone, which is checked on the paragraph sized above.
+    placeCaret(1, 2)
+    setNativeValue(sizeInput(), '24')
+    sizeInput().dispatchEvent(new Event('input', { bubbles: true }))
+    await settle(10)
+    if (reactKey && typeof sizeInput()[reactKey].onChange === 'function' && ![...holder.querySelectorAll('.ce-block')][1].querySelector('[style*="font-size"]')) {
+      await sizeInput()[reactKey].onChange({ target: sizeInput(), currentTarget: sizeInput() })
+    }
+    await settle(20)
+    const headingAfter = [...holder.querySelectorAll('.ce-block')][1]
+    report.blockSizedSpans = headingAfter.querySelectorAll('[style*="font-size"]').length
+    report.blockSizedText = (headingAfter.textContent || '').trim()
+    // The paragraph next door still carries its own, five blocks later.
+    report.paragraphKeptItsSize = styledParagraph()
+    report.statusAfterBlock = (container.querySelector('[data-writing-message]') || {}).textContent || ''
+
+    // A QUOTE IS REFUSED, not silently lost: the vendored quote tool's own save
+    // strips every attribute but br, so a size set there would vanish at the next
+    // save. The refusal has to leave the run alone and say why.
+    placeCaret(4, 1)
+    setNativeValue(sizeInput(), '30')
+    sizeInput().dispatchEvent(new Event('input', { bubbles: true }))
+    await settle(20)
+    if (reactKey && typeof sizeInput()[reactKey].onChange === 'function' && !/quote/.test((container.querySelector('[data-writing-message]') || {}).textContent || '')) {
+      await sizeInput()[reactKey].onChange({ target: sizeInput(), currentTarget: sizeInput() })
+      await settle(10)
+    }
+    const quoteAfter = [...holder.querySelectorAll('.ce-block')][4]
+    report.quoteSpans = quoteAfter.querySelectorAll('[style*="font-size"]').length
+    report.quoteStatus = (container.querySelector('[data-writing-message]') || {}).textContent || ''
 
     // ---- Save reads the EDITOR and writes the model -----------------------------
     // The button is a real click, the route is the stubbed one, and the document it
@@ -394,7 +557,53 @@ async function run() {
       report.savedText = saved.blocks.map((block) => block.runs.map((run) => run.text).join('')).join('|')
       report.savedLevels = saved.blocks.filter((block) => block.type === 'heading').map((block) => block.level).join(',')
       report.savedBold = saved.blocks[2].runs.filter((run) => run.marks.includes('b')).map((run) => run.text).join('')
+      // The two run sizes the bar set, as the MODEL holds them after a real editor
+      // round trip: the selected range at 18pt, the collapsed caret's whole heading
+      // at 24pt, and nothing at all in the quote the tool would have stripped.
+      report.savedSized = saved.blocks[2].runs.filter((run) => run.size === 18).map((run) => run.text).join('|')
+      report.savedHeadingSized = saved.blocks[1].runs.every((run) => run.size === 24)
+      report.savedQuoteSized = saved.blocks[4].runs.some((run) => Number.isFinite(run.size))
+      }
+
+    // ---- Proof: show the export, and open the file ------------------------------
+    // The two things a person asked for: the right bar must actually SHOW the pane
+    // it opens (a collapsed column takes it invisibly), and the file must open in
+    // whatever application owns a .docx. Both are recorded from the stubs.
+    const calls = { resources: [], kinds: [], toggled: 0, opened: [] }
+    const sidebarStub = {
+      openResource: (address, options) => {
+        calls.resources.push(address)
+        calls.kinds.push(options && options.kind)
+        return true
+      },
+      isExpanded: () => false,
+      toggleExpanded: () => {
+        calls.toggled += 1
+      },
     }
+    const tabsStub = { entries: () => [{ id: '@deepseek-ai/dsh-client-ui-sidebar-documentpreview', kind: 'docx' }] }
+    ctx.get = (service) => {
+      if (service === 'sidebarRight') return sidebarStub
+      if (service === 'sidebarRightTabs') return tabsStub
+      if (service === 'remote.session') {
+        return {
+          openWorkspacePath: async (request) => {
+            calls.opened.push(request && request.path)
+            return { ok: true }
+          },
+        }
+      }
+      return undefined
+    }
+    const proofButton = container.querySelector('[data-action="proof"]')
+    report.proofButton = Boolean(proofButton)
+    proofButton.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    await settle(40)
+    report.proofResources = calls.resources
+    report.proofKinds = calls.kinds
+    report.proofExpanded = calls.toggled
+    report.proofOpened = calls.opened
+    report.proofStatus = (container.querySelector('[data-writing-message]') || {}).textContent || ''
 
     // ---- one missing tool is not a dead tab ------------------------------------
     window.__missing.push('quote.umd.js')
@@ -467,6 +676,43 @@ run()
     check('the saved document kept the heading levels', report.savedLevels, '1,2')
     check('the saved document kept the words', text(report.savedText), report.expected)
     check('the saved document kept the inline mark', report.savedBold, 'bold')
+    // The column fills the pane at 100%, and the zoom multiplies the TYPE instead of
+    // the width: 12pt is 16px, so 200% is 32px on a column that is still the pane's.
+    check('the editor column is as wide as its pane', report.fillsPane, true)
+    check('the column carries the document\u2019s typography', text(report.editorColumnStyle).includes('Georgia'), true)
+    check('100% draws the document\u2019s own size', text(report.fontAt100), '16px')
+    check('200% doubles the type', text(report.fontAt200), '32px')
+    check('200% does not widen the column past the pane', report.widthAt200 <= report.paneWidth + 1, true)
+    // The bar's two controls set the SELECTION: a span in the editor, a run in the
+    // model after the editor's own save, and the selection kept where the person put it.
+    check('the size control was read for the selection', text(report.barSizeForSelection), '12')
+    check('the painter writes a run size as DATA and as paint', /data-size="18"/.test(text(report.painterRun)) && /font-size:18pt/.test(text(report.painterRun)), true)
+    check('  ...and the reader takes it from the data', /"size":18/.test(text(report.readerRun)), true)
+    check('  ...and from an inline style, for a paste', /"size":18/.test(text(report.readerFromStyle)), true)
+    check('setting a size wraps the selection in a sized span', report.domSizedSpan === true, true)
+    check('  ...with the size in points', /\b18(\.0)?pt\b/.test(text(report.domSizedStyle)), true)
+    check('  ...and the selection survives the re-render', text(report.selectionKept), 'plain')
+    check('  ...and the control now shows that size', text(report.sizeAfterApply), '18')
+    check('  ...and the status says it was the selection', /on the selection/.test(text(report.statusAfterApply)), true)
+    check('the saved document carries the run\u2019s own size', text(report.savedSized), 'plain')
+    // A collapsed caret means the block, which is the useful reading of "make this
+    // line bigger" and is named in the status.
+    check('a collapsed caret sizes the WHOLE block', report.blockSizedSpans >= 1 && report.blockSizedText === 'A heading', true)
+    check('  ...and the model keeps it', report.savedHeadingSized, true)
+    check('  ...and the status says it was the block', /on this block/.test(text(report.statusAfterBlock)), true)
+    check('  ...and the paragraph next door kept its own size', report.paragraphKeptItsSize, true)
+    // A quote is refused because the vendored tool's own save would strip it - the
+    // one place a run property cannot live, said out loud instead of lost later.
+    check('a size is refused inside a quote', report.quoteSpans, 0)
+    check('  ...and the refusal names the quote tool', /quote/.test(text(report.quoteStatus)), true)
+    check('  ...so nothing in the quote carries a size', report.savedQuoteSized, false)
+    // Proof: the preview is opened WITH the kind the registry names, the collapsed
+    // column is expanded so it can be seen, and the Desktop file is handed to its app.
+    check('Proof hands the workspace copy to the shipped preview', (report.proofResources || []).length, 1)
+    check('  ...under the kind the registry names', (report.proofKinds || []).join(','), 'docx')
+    check('  ...and expands the right bar so it can be seen', report.proofExpanded, 1)
+    check('  ...and opens the Desktop file in its own application', (report.proofOpened || []).join(','), 'C:\\Users\\check\\Desktop\\Check document.docx')
+    check('  ...and the status says where it went', /Check document\.docx/.test(text(report.proofStatus)), true)
     check('the page reported no errors', (report.errors || []).concat(report.seenErrors || []).length, 0)
     if ((report.errors || []).length > 0) console.log('     ' + report.errors.join('\n     '))
     if ((report.seenErrors || []).length > 0) console.log('     early: ' + report.seenErrors.join(' | '))
