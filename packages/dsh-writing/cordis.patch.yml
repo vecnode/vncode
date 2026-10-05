@@ -1,10 +1,16 @@
 # dsh-writing bundle layer (alpha).
 #
 # Applied on top of the shipped web bundle rows. This plugin registers ONE extra
-# row ('writing') that owns the plugin's Node half - the authenticated
-# /api/dsh-writing/* routes: the document store, the .docx codec's import and
-# export, and the page breaker the browser half imports - and therefore ships its
-# browser half (dsh.client) with the Loader entry.
+# row ('writing') that owns the plugin's Node half - three model-facing tools
+# (`writing_list`, `writing_read`, `writing_write`), the research skill this pack
+# ships, and the authenticated /api/dsh-writing/* routes: the document store, the
+# .docx codec's import and export, and the page breaker the browser half imports
+# - and therefore ships its browser half (dsh.client) with the Loader entry.
+#
+# The tools write through the SAME store the tab reads, so a document the agent
+# composes is a document the person can edit, proof and export; the tools and the
+# skill are registered BEFORE the route block, which needs the connection service
+# and returns early without it.
 #
 # Nothing else is patched, and nothing is disabled or forked:
 #   - the Writing tab is a `conversation.view` entry at order 30, which puts it

@@ -5,13 +5,14 @@
  * id `writing` at `order: 30`, which puts it to the right of Canvas (20),
  * Trajectory (10) and Chat (0) - the chat panel's own view ring.
  *
- * WHAT IT IS. A page you write on, with the pages visible. The document model is
- * the host's (`lib/model.js`): a title, a page setup in millimetres, and blocks
- * of runs carrying the six inline marks a `.docx` holds without a style table.
- * The tab renders that model as paper, edits it, and saves it into the plugin's
- * own persistent store - many documents per conversation, the shape
- * `dsh-diagrams` gives a diagram - so nothing here overwrites a file somebody
- * wrote by hand.
+ * WHAT IT IS. A document you write on, editable in the **vendored Editor.js**
+ * surface (see `packages/dsh-writing/vendor/editorjs/`). The document model is the
+ * host's (`lib/model.js`): a title, a page setup, and a block list of runs carrying
+ * the six inline marks a `.docx` holds without a style table - and this tab is the
+ * bridge between that model and Editor.js's own block JSON, in both directions, on
+ * every save. The tab saves into the plugin's own persistent store - many documents
+ * per conversation, the shape `dsh-diagrams` gives a diagram - so nothing here
+ * overwrites a file somebody wrote by hand.
  *
  * WHAT IT IS NOT, and this is the design's centre: **it renders nothing with
  * LibreOffice and it wants to.** "Proof" exports the document as a real `.docx`
@@ -22,22 +23,22 @@
  * makes of it is core's own - which is exactly the split that keeps this package
  * from becoming a second office renderer.
  *
- * HOW THE EDITING WORKS, and why not a contenteditable library. The pack ships no
- * dependencies, and a rich-text engine would be a second model to keep in step
- * with the one the host validates. Instead the editor is small and explicit:
- * **one `contenteditable` per block**, whose DOM is read back into runs on every
- * input, and whose structure is only re-rendered when the block structure
- * changes (`epoch`) - so typing never has React rewrite the node the caret is in.
- * Formatting is applied to the MODEL (`applyMarkToRuns`, over a character range
- * computed from the selection) and the caret is then restored by character
- * offset - which means the whole formatting path is a pure function the checks
- * drive with no browser at all.
+ * HOW THE EDITING WORKS. Editor.js owns the surface: it draws the blocks, its own
+ * block menu inserts a header, a list, a quote or a code block, and its inline
+ * toolbar carries bold and italic. The two blocks this pack needs to carry MORE
+ * than Editor.js's stock tools do - the paragraph and the header - are this
+ * package's own tools below: they render the six inline marks this model has (and
+ * the run font and size it can hold), and they read them back into runs on save.
+ * What the editor cannot carry is not silently dropped: the tab's banner names it,
+ * which is the same report the `.docx` importer already gives.
  *
- * THE PAGE BREAKER is `lib/page.js`, fetched from this plugin's own route and
- * imported from a blob URL (the shape `dsh-canvas` uses for its engine), so the
- * splitter that runs in the tab is the same file the checks drive on the host. If
- * that import fails the tab still works and says so: every block lands on one
- * page.
+ * THE PAPER IS GONE, deliberately. Editor.js is a block list, not a paginated
+ * surface: there are no page boxes, no margins in millimetres and no sheet numbers,
+ * and the page setup in the Document menu is applied as the editor's column width
+ * and typography (and written into the `.docx`) rather than drawn. `lib/page.js`
+ * still exists and the host still serves it - the block-level splitter is a public
+ * part of this package - but this half no longer imports it. See the README's
+ * Limits.
  */
 /* global window, document, fetch, Blob, URL, console */
 window.__ModuleLoader__.load({
@@ -52,7 +53,7 @@ window.__ModuleLoader__.load({
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     /** The version marker shown in the status bar, so a fresh bundle is easy to spot. */
-    const PLUGIN_VERSION = '0.1.0-alpha.3'
+    const PLUGIN_VERSION = '0.1.0-alpha.5'
     /** The conversation view this package adds to the chat panel's ring. */
     const VIEW_ID = 'writing'
     /** Base URL of this plugin's own authenticated routes. */
@@ -103,7 +104,6 @@ window.__ModuleLoader__.load({
     // (The New-file dialog is this tab's OWN, so no modal service is needed for
     // it: a dialog the page cannot style and cannot close on its own terms is not
     // what a document tab should hand a person.)
-    const PAGE_ROUTE = API_ROOT + '/page.js'
     /** The right bar's navigation controller (dsh-rightbar), resolved lazily. */
     const SIDEBAR_SERVICE = 'sidebarRight'
     /** The tab-type registry (dsh-rightbar), whose entries name every registered kind. */
@@ -127,10 +127,39 @@ window.__ModuleLoader__.load({
      * precision about where the last page break falls.
      */
     const MAX_LINE_SCAN = 2400
-    /** The zoom ladder. The page is laid out in millimetres; this only magnifies. */
+    /** The zoom ladder. The editor is laid out in pixels; this only widens the column. */
     const ZOOM_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 2]
     /** How long typing rests before the document saves itself. */
     const AUTOSAVE_MS = 4000
+    /**
+     * The vendored Editor.js surface this tab edits in: one file per script, in the
+     * order the browser must load them (the tools need the core global), and the
+     * global each one leaves behind. The two names that are not the obvious one are
+     * here on purpose: `@editorjs/list` leaves `EditorjsList` and `@editorjs/quote`
+     * leaves `Quote`.
+     */
+    const EDITOR_SCRIPTS = [
+      { file: 'editorjs.umd.js', global: 'EditorJS' },
+      { file: 'paragraph.umd.js', global: 'Paragraph' },
+      { file: 'header.umd.js', global: 'Header' },
+      { file: 'editorjs-list.umd.js', global: 'EditorjsList' },
+      { file: 'quote.umd.js', global: 'Quote' },
+      { file: 'code.umd.js', global: 'Code' },
+    ]
+    /** Where those files are served from: one exact route per file. */
+    const EDITOR_ROUTE = API_ROOT + '/vendor/editorjs/'
+    /** How long one vendored script is given to arrive before the tab says so. */
+    const EDITOR_LOAD_MS = 20000
+    /** How long typing rests before the model is re-read from the editor. */
+    const SYNC_MS = 150
+    /** The inline mark attribute this pack's own tools stamp, and their sanitizer allows. */
+    const MARK_ATTRIBUTE = 'data-mark'
+    /** The inline tools Editor.js's OWN toolbar offers here. */
+    const EDITOR_INLINE_TOOLS = ['bold', 'italic']
+    /** The block types the vendored editor knows: any other is kept as a paragraph. */
+    const EDITOR_KNOWN_TYPES = new Set(['paragraph', 'header', 'list', 'quote', 'code', 'delimiter'])
+    /** At most this many blocks: the model's own budget, enforced on this side too. */
+    const MAX_BLOCKS = 4000
     /** The inline marks, in toolbar order. */
     const MARK_BUTTONS = [
       ['b', 'B', 'Bold'],
@@ -139,7 +168,7 @@ window.__ModuleLoader__.load({
       ['s', 'S', 'Strikethrough'],
       ['code', '\u2039\u203a', 'Code'],
     ]
-    /** The block types the toolbar offers, with the label each option shows. */
+    /** The block types the status bar names, with the label each option shows. */
     const BLOCK_CHOICES = [
       ['paragraph', null, 'Body text'],
       ['heading', 1, 'Heading 1'],
@@ -247,6 +276,31 @@ window.__ModuleLoader__.load({
       if (family.length > 0) run.font = family
       if (points !== null) run.size = points
       out.push(run)
+    }
+
+    /**
+     * A block's runs as this model holds them: empty runs dropped, and neighbouring
+     * runs with the SAME marks, family and size merged.
+     *
+     * The merge is the model's own rule (`lib/model.js` does exactly this on the
+     * host) and it is on this side too, because it is what keeps the `.docx`
+     * writer's output stable: one `<w:r>` per keystroke would make a 400-word page
+     * a hundred kilobytes. The two copies cannot drift where it matters -
+     * `check-writing-node.mjs` runs the host's and `check-client-bundles.mjs` runs
+     * this one against the same cases.
+     *
+     * @param runs - the runs to normalize.
+     * @returns the runs (never zero: one empty run, so a block always has a shape).
+     */
+    function normalizeRuns(runs) {
+      const list = Array.isArray(runs) ? runs : []
+      const out = []
+      for (const raw of list) {
+        const value = raw && typeof raw.text === 'string' ? raw.text : ''
+        if (value.length === 0) continue
+        pushRun(out, value, Array.isArray(raw.marks) ? raw.marks : [], typeof raw.font === 'string' ? raw.font : '', raw.size)
+      }
+      return out.length > 0 ? out : [{ text: '', marks: [] }]
     }
 
     /**
@@ -557,6 +611,333 @@ window.__ModuleLoader__.load({
       return inner.length > 0 ? inner : '<br>'
     }
 
+    /** A font family as an inline style value, with the quotes CSS needs. */
+    function styleFamily(value) {
+      return "'" + String(value).replaceAll("'", '').replaceAll('"', '') + "'"
+    }
+
+    /**
+     * One block's runs as HTML with the marks spelled as an ATTRIBUTE, not as
+     * nested elements.
+     *
+     * This is the shape this package's own Editor.js tools render and read: a
+     * sequence of spans, each carrying the marks it has on `data-mark`. Elements
+     * would nest (`<s><u><em><strong><code>x</code>...`), and the browser is free
+     * to reorder or drop that nesting when a person types inside it - an attribute
+     * cannot be reordered, so a mark survives an edit in the middle of a marked
+     * word. `runsFromHtmlString` reads both shapes, so a paste and the browser's
+     * own bold still come back with their marks.
+     *
+     * @param runs - the runs.
+     * @returns the HTML (never empty: one break, so an editable has a caret in it).
+     */
+    function markHtml(runs) {
+      const list = Array.isArray(runs) ? runs : []
+      const html = list
+        .map((run) => {
+          const text = escapeHtml(run.text).replaceAll('\n', '<br>')
+          if (text.length === 0) return ''
+          const marks = (Array.isArray(run.marks) ? run.marks : []).filter((mark) => MARK_BUTTONS.some((entry) => entry[0] === mark))
+          const style = runStyle(run)
+          const attributes = []
+          if (marks.length > 0) attributes.push(MARK_ATTRIBUTE + '="' + escapeHtml(marks.join(' ')) + '"')
+          if (style.length > 0) attributes.push('style="' + escapeHtml(style) + '"')
+          // ONE element per run, never a shared one: neighbouring runs have
+          // DIFFERENT marks, so wrapping them together would make the reader hand
+          // the first run's marks to the second (a `b` run beside a plain one would
+          // come back bold), and a browser's own bold would then drift.
+          return attributes.length > 0 ? '<span ' + attributes.join(' ') + '>' + text + '</span>' : text
+        })
+        .join('')
+      return html.length > 0 ? html : '<br>'
+    }
+
+    /** One opening/closing tag's name, attributes, self-closing flag and direction. */
+    function parseTag(text) {
+      const selfClosing = /\/\s*>$/.test(text)
+      const body = text.slice(1, selfClosing ? text.length - 2 : -1)
+      // A CLOSING tag's body starts with `/`, so the name has to be read past it -
+      // otherwise `</span>` parses as an empty name and the frame it should close
+      // stays open, which would hand its marks to every run after it.
+      const closing = body.startsWith('/')
+      const name = (/^\s*\/?\s*([A-Za-z][A-Za-z0-9-]*)/.exec(body) ?? [])[1] ?? ''
+      const attributes = {}
+      const pattern = /([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)')/g
+      let match = pattern.exec(body)
+      while (match !== null) {
+        attributes[match[1].toLowerCase()] = match[3] !== undefined ? match[3] : match[4]
+        match = pattern.exec(body)
+      }
+      return { name: name.toUpperCase(), attributes, selfClosing, closing }
+    }
+
+    /**
+     * The next real `<...>` in a string, or -1.
+     *
+     * Every tag this reads starts with a letter or a slash right after the bracket,
+     * so a `<` that begins plain text (`a < b`) stays text. A paste is untrusted
+     * input, and the cost of being wrong here is one character - where the cost of
+     * a browser HTML parser would be a second DOM model to keep in step with this
+     * one.
+     */
+    function nextTag(text, from) {
+      for (let i = text.indexOf('<', from); i !== -1; i = text.indexOf('<', i + 1)) {
+        if (/^<\/?[A-Za-z]/.test(text.slice(i, i + 3)) || text.startsWith('<!--', i)) return i
+      }
+      return -1
+    }
+
+    /**
+     * The family and size an inline `style` names, as the run properties this model
+     * carries: a family name and a size in POINTS.
+     *
+     * @param style - the CSS text.
+     * @returns `{ font, size }` (`''` and null when it names neither).
+     */
+    function parseRunStyle(style) {
+      const family = /font-family\s*:\s*([^;]+)/i.exec(String(style ?? ''))
+      const size = /font-size\s*:\s*([^;]+)/i.exec(String(style ?? ''))
+      return {
+        font: family ? unquoteFamily(family[1]) : '',
+        size: size ? parseFontSize(size[1]) : null,
+      }
+    }
+
+    /**
+     * Runs from an HTML string - what this tab's own tools save, and what a paste
+     * lands as.
+     *
+     * Tolerant by design: an unknown element is transparent (its text is kept), a
+     * `<br>` is a soft break inside the run, and the marks come from an element
+     * name, a `data-mark` attribute or the inline style the toolbar set. Nothing
+     * here can throw on a malformed document, and nothing is dropped.
+     *
+     * @param html - the HTML.
+     * @returns the runs (never zero: one empty run, so a block always has a shape).
+     */
+    function runsFromHtmlString(html) {
+      const out = []
+      const source = String(html ?? '')
+      const stack = []
+      let text = ''
+      let index = 0
+      const flush = () => {
+        if (text.length === 0) return
+        const marks = []
+        let font = ''
+        let size = null
+        for (const frame of stack) {
+          if (frame.mark !== null && !marks.includes(frame.mark)) marks.push(frame.mark)
+          for (const mark of frame.marks) if (!marks.includes(mark)) marks.push(mark)
+          if (frame.font.length > 0) font = frame.font
+          if (frame.size !== null) size = frame.size
+        }
+        pushRun(out, text.replaceAll('\u00a0', ' '), marks, font, size)
+        text = ''
+      }
+      while (index < source.length) {
+        const at = nextTag(source, index)
+        if (at === -1) {
+          text += source.slice(index)
+          break
+        }
+        text += source.slice(index, at)
+        const close = source.indexOf('>', at + 1)
+        if (close === -1) {
+          text += source.slice(at)
+          break
+        }
+        const raw = source.slice(at, close + 1)
+        index = close + 1
+        if (raw.startsWith('<!--')) {
+          const end = source.indexOf('-->', at)
+          index = end === -1 ? source.length : end + 3
+          continue
+        }
+        const tag = parseTag(raw)
+        if (tag.name === '') continue
+        if (tag.name === 'BR') {
+          text += '\n'
+          continue
+        }
+        if (tag.closing) {
+          if (stack.length > 0) {
+            flush()
+            stack.pop()
+          }
+          continue
+        }
+        const style = parseRunStyle(tag.attributes.style ?? '')
+        const declared = String(tag.attributes[MARK_ATTRIBUTE] ?? '').toLowerCase().split(/[\s,]+/).filter((mark) => mark.length > 0)
+        flush()
+        if (!tag.selfClosing) {
+          stack.push({ mark: markForTag(tag.name), marks: declared, font: style.font, size: style.size })
+        }
+      }
+      flush()
+      return out.length > 0 ? out : [{ text: '', marks: [] }]
+    }
+
+    /**
+     * The list items a run of model blocks becomes: consecutive, same-kind items.
+     * @param blocks - the model's blocks.
+     * @param start - the index the run starts at.
+     * @returns `{ style, items, next }`.
+     */
+    function listItemsFrom(blocks, start) {
+      const ordered = blocks[start].ordered === true
+      const items = []
+      let index = start
+      while (index < blocks.length) {
+        const block = blocks[index]
+        if (!block || block.type !== 'listItem' || (block.ordered === true) !== ordered) break
+        items.push({ level: Number.isFinite(block.level) ? Math.max(0, Math.min(4, Math.round(block.level))) : 0, runs: normalizeRuns(block.runs) })
+        index += 1
+      }
+      return { style: ordered ? 'ordered' : 'unordered', items, next: index }
+    }
+
+    /** The list tool's nested items, as the model's 0-based levels. */
+    function listItemsFromData(items, level, ordered, out) {
+      for (const item of Array.isArray(items) ? items : []) {
+        if (!item || typeof item !== 'object') continue
+        out.push({ ordered, level, runs: runsFromHtmlString(typeof item.content === 'string' ? item.content : '') })
+        listItemsFromData(item.items, Math.min(4, level + 1), ordered, out)
+      }
+      return out
+    }
+
+    // -----------------------------------------------------------------------
+    // The bridge to Editor.js: this model in, Editor.js's block JSON out, and
+    // back. The host half of the same translation is
+    // `packages/dsh-writing/lib/editorjs.js`, and `check-writing-node.mjs` drives
+    // that one while `check-client-bundles.mjs` drives these - the browser half is
+    // one bundle with no imports, and the host half may not touch a DOM, so the two
+    // implementations are kept in step by being driven against the same cases from
+    // both sides.
+    // -----------------------------------------------------------------------
+
+    /**
+     * Model blocks as Editor.js `data`.
+     *
+     * @param doc - a document.
+     * @param now - the timestamp in `data.time`, so a check can pass a fixed one.
+     * @returns `{ time, blocks }`, the shape `new EditorJS({ data })` takes.
+     */
+    function toEditorData(doc, now = Date.now()) {
+      const blocks = doc && Array.isArray(doc.blocks) ? doc.blocks : []
+      const out = []
+      let index = 0
+      while (index < blocks.length && out.length < MAX_BLOCKS) {
+        const block = blocks[index]
+        if (!block || typeof block !== 'object') {
+          index += 1
+          continue
+        }
+        if (block.type === 'heading') {
+          const level = Number.isFinite(block.level) ? Math.max(1, Math.min(6, Math.round(block.level))) : 1
+          out.push({ type: 'header', data: { text: markHtml(normalizeRuns(block.runs)), level } })
+          index += 1
+          continue
+        }
+        if (block.type === 'listItem') {
+          const group = listItemsFrom(blocks, index)
+          // The list tool nests; the model carries a 0-based level. An item at a
+          // deeper level becomes the LAST CHILD of the deepest item above it, which
+          // is what the tool's own indentation means - and what the reverse reads
+          // back. The stack is the chain of open ancestors, so its length after the
+          // pop IS the level the item belongs at.
+          const roots = []
+          const stack = []
+          for (const item of group.items) {
+            const node = { content: markHtml(item.runs), items: [] }
+            stack.length = Math.min(stack.length, item.level)
+            const parent = stack.length > 0 ? stack[stack.length - 1] : null
+            if (parent) parent.items.push(node)
+            else roots.push(node)
+            stack.push(node)
+          }
+          out.push({ type: 'list', data: { style: group.style, items: roots } })
+          index = group.next
+          continue
+        }
+        if (block.type === 'quote') {
+          out.push({ type: 'quote', data: { text: markHtml(normalizeRuns(block.runs)), caption: '' } })
+          index += 1
+          continue
+        }
+        if (block.type === 'code') {
+          out.push({ type: 'code', data: { code: normalizeRuns(block.runs).map((run) => run.text).join('') } })
+          index += 1
+          continue
+        }
+        if (block.type === 'pageBreak') {
+          out.push({ type: 'delimiter', data: {} })
+          index += 1
+          continue
+        }
+        out.push({ type: 'paragraph', data: { text: markHtml(normalizeRuns(block.runs)) } })
+        index += 1
+      }
+      return { time: now, blocks: out }
+    }
+
+    /**
+     * Editor.js `data` as model blocks, with the counted losses only a save can
+     * know: a page break (the editor shows it as a separator, not as a page) and a
+     * block type no vendored tool has.
+     *
+     * @param data - `{ blocks }` from `editor.saver.save()`.
+     * @returns `{ blocks, losses }`.
+     */
+    function fromEditorData(data) {
+      const source = Array.isArray(data && data.blocks) ? data.blocks : []
+      const blocks = []
+      const losses = []
+      let unknown = 0
+      for (const raw of source) {
+        if (!raw || typeof raw !== 'object' || blocks.length >= MAX_BLOCKS) continue
+        const type = String(raw.type ?? '')
+        const body = raw.data && typeof raw.data === 'object' ? raw.data : {}
+        if (!EDITOR_KNOWN_TYPES.has(type)) unknown += 1
+        if (type === 'header') {
+          const level = Number.isFinite(Number(body.level)) ? Math.max(1, Math.min(6, Math.round(Number(body.level)))) : 2
+          blocks.push({ type: 'heading', level, runs: runsFromHtmlString(String(body.text ?? '')) })
+          continue
+        }
+        if (type === 'list') {
+          const ordered = body.style === 'ordered'
+          for (const item of listItemsFromData(body.items, 0, ordered, [])) {
+            blocks.push({ type: 'listItem', ordered: item.ordered, level: item.level, runs: item.runs })
+          }
+          continue
+        }
+        if (type === 'quote') {
+          const text = String(body.text ?? '')
+          const caption = String(body.caption ?? '')
+          // The model has no caption field: a caption is a second line, which
+          // preserves the text and is not counted as a loss.
+          blocks.push({ type: 'quote', runs: runsFromHtmlString(caption.length > 0 ? text + '<br>' + caption : text) })
+          continue
+        }
+        if (type === 'code') {
+          blocks.push({ type: 'code', runs: normalizeRuns([{ text: String(body.code ?? ''), marks: [] }]) })
+          continue
+        }
+        if (type === 'delimiter') {
+          blocks.push({ type: 'pageBreak', runs: [{ text: '', marks: [] }] })
+          losses.push({ kind: 'page break', count: 1, note: 'the editor shows it as a separator, not as a new page' })
+          continue
+        }
+        const text = typeof body.text === 'string' ? body.text : typeof body.code === 'string' ? body.code : ''
+        blocks.push({ type: 'paragraph', runs: runsFromHtmlString(text) })
+      }
+      if (unknown > 0) {
+        losses.push({ kind: 'block type the editor does not have', count: unknown, note: 'kept as a paragraph, with its text' })
+      }
+      return { blocks, losses }
+    }
+
     /** The class and data attributes one block's element wears. */
     function blockAttributes(block, extra) {
       const attributes = {
@@ -819,50 +1200,13 @@ window.__ModuleLoader__.load({
 .dsw-importRow{display:flex;gap:4px}
 .dsw-input{flex:1;min-width:0;height:24px;box-sizing:border-box;border:.5px solid var(--dsw-alias-border-l3);border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary);font:inherit;font-size:11.5px;padding:0 6px;outline:none}
 .dsw-scroll{flex:1;min-width:0;overflow:auto;padding:16px 0 140px;background:var(--dsw-alias-bg-layer-1)}
-.dsw-pages{display:flex;flex-direction:column;align-items:center;gap:16px}
-.dsw-page{position:relative;box-sizing:border-box;background:#fff;color:#111;box-shadow:0 1px 3px rgba(0,0,0,.24),0 8px 24px rgba(0,0,0,.14)}
-.dsw-pageNo{position:absolute;left:0;right:0;bottom:7px;text-align:center;font-size:10.5px;color:#8a8a8a;pointer-events:none}
-.dsw-pageFlow{box-sizing:border-box}
-.dsw-block{outline:none;min-height:1.5em;white-space:pre-wrap;overflow-wrap:break-word;word-break:normal}
-.dsw-block+.dsw-block{margin-top:0}
-.dsw-block[data-type=paragraph]{margin:0 0 .42em}
-/* Heading sizes are relative (em) to the DOCUMENT's own size, so changing the
-   document font size scales the headings with it instead of leaving a 12pt page
-   with 23px headings. */
-.dsw-block[data-type=heading]{margin:0 0 .5em;font-weight:600;line-height:1.25}
-.dsw-block[data-level="1"]{font-size:1.9em}
-.dsw-block[data-level="2"]{font-size:1.55em}
-.dsw-block[data-level="3"]{font-size:1.3em}
-.dsw-block[data-level="4"]{font-size:1.12em}
-.dsw-block[data-type=heading][data-level="1"]{font-size:1.9em}
-.dsw-block[data-type=heading][data-level="2"]{font-size:1.55em}
-.dsw-block[data-type=heading][data-level="3"]{font-size:1.3em}
-.dsw-block[data-type=heading][data-level="4"]{font-size:1.12em}
-.dsw-block[data-type=heading][data-level="5"]{font-size:1em}
-.dsw-block[data-type=heading][data-level="6"]{font-size:1em;font-style:italic}
-.dsw-block[data-type=listItem]{margin:0 0 .2em}
-.dsw-block[data-type=listItem][data-level="0"]{padding-left:1.6em;text-indent:-1.1em}
-.dsw-block[data-type=listItem][data-level="1"]{padding-left:3.2em;text-indent:-1.1em}
-.dsw-block[data-type=listItem][data-level="2"]{padding-left:4.8em;text-indent:-1.1em}
-.dsw-block[data-type=listItem][data-level="3"]{padding-left:6.4em;text-indent:-1.1em}
-.dsw-block[data-type=listItem][data-ordered=false][data-level="0"]:before{content:"\\2022\\00a0\\00a0"}
-.dsw-block[data-type=listItem][data-ordered=false][data-level="1"]:before{content:"\\25e6\\00a0\\00a0"}
-.dsw-block[data-type=listItem][data-ordered=false][data-level="2"]:before{content:"\\25aa\\00a0\\00a0"}
-.dsw-block[data-type=listItem][data-ordered=false][data-level="3"]:before{content:"\\2022\\00a0\\00a0"}
-.dsw-block[data-type=listItem][data-ordered=true][data-level="0"]{counter-increment:dsw-list0}
-.dsw-block[data-type=listItem][data-ordered=true][data-level="0"]:before{content:counter(dsw-list0) ".\\00a0\\00a0"}
-.dsw-block[data-type=listItem][data-ordered=true][data-level="1"]{counter-increment:dsw-list1}
-.dsw-block[data-type=listItem][data-ordered=true][data-level="1"]:before{content:counter(dsw-list1) ".\\00a0\\00a0"}
-.dsw-pageFlow{counter-reset:dsw-list0 dsw-list1}
-.dsw-block[data-type=quote]{margin:0 1.4em .42em;padding-left:.7em;border-left:2px solid #d8d8d8;color:#4a4a4a;font-style:italic}
-.dsw-block[data-type=code]{margin:0 0 .42em;padding:.35em .5em;background:#f5f5f5;border-radius:4px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;white-space:pre-wrap}
-.dsw-block[data-align=center]{text-align:center}
-.dsw-block[data-align=right]{text-align:right}
-.dsw-block[data-align=justify]{text-align:justify}
-.dsw-page[data-proof=true] .dsw-block{background:transparent}
-.dsw-break{position:relative;height:0;border-top:1px dashed rgba(211,56,44,.55);margin:.6em 0 .8em}
-.dsw-break:after{content:"page break";position:absolute;right:0;top:-14px;font-size:9.5px;letter-spacing:.04em;text-transform:uppercase;color:rgba(211,56,44,.9)}
-.dsw-measure{position:absolute;left:-20000px;top:0;visibility:hidden;pointer-events:none;z-index:-1}
+/* THE EDITOR SURFACE. The document is a column of blocks, not a sheet of paper:
+   its width is the page's content width in pixels and its typography is the
+   document's own, so what is on screen is what the .docx says. */
+.dsw-editor{max-width:100%;margin:0 auto;padding:0 24px}
+.dsw-host{min-height:320px}
+.dsw-host[data-writing-editor='loading']{opacity:.6}
+.dsw-editorNote{padding:6px 0 0;font-size:11.5px;color:var(--dsw-alias-label-tertiary)}
 .dsw-loss{flex:none;display:flex;align-items:flex-start;gap:8px;padding:6px 10px;border-bottom:.5px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-state-warning-bg,rgba(210,153,34,.14));font-size:12px}
 .dsw-lossText{flex:1;min-width:0}
 .dsw-status{flex:none;display:flex;align-items:center;gap:10px;padding:4px 10px;border-top:.5px solid var(--dsw-alias-border-l3);font-size:11px;color:var(--dsw-alias-label-tertiary)}
@@ -870,11 +1214,49 @@ window.__ModuleLoader__.load({
 .dsw-status[data-kind=warn]{color:var(--dsw-alias-state-warning-primary,#d29922)}
 .dsw-spacer{flex:1;min-width:0}
 .dsw-empty{padding:24px;font-size:12.5px;color:var(--dsw-alias-label-tertiary);text-align:center}
-.dsw-emptyPage{min-height:1.5em;cursor:text;color:transparent}
-/* A fragment is part of a block the page boundary runs through: it must not carry
-   the block's bottom margin, or the page break would add space nobody asked for. */
-.dsw-block[data-split=true]{margin-bottom:0}
-.dsw-block[data-split=true]:after{content:"";display:block}
+/* Editor.js injects its own stylesheet (its UMD carries it) and its defaults are a
+   light theme. These overrides put the surface on this app's own tokens so the
+   editor is not the one white rectangle in a dark window - and they are scoped
+   under .dsw-editor, so nothing here leaks into another plugin's surface. */
+.dsw-editor .codex-editor{color:var(--dsw-alias-label-primary);font-family:inherit}
+.dsw-editor .codex-editor__redactor{padding-bottom:60px!important}
+.dsw-editor .ce-block__content,.dsw-editor .ce-toolbar__content{max-width:none;margin:0}
+.dsw-editor .ce-paragraph,.dsw-editor .ce-header,.dsw-editor .cdx-block{color:var(--dsw-alias-label-primary);font-family:inherit}
+/* The heading levels. Editor.js's own header tool ships no size scale, and this
+   package renders the level as a class (h1..h6) rather than as the element name, so
+   the scale lives here - relative to the DOCUMENT's own size, because that is what
+   the .docx carries and what the whole column inherits. */
+.dsw-editor .ce-header{margin:0 0 .5em;font-weight:600;line-height:1.25}
+.dsw-editor .ce-header.h1{font-size:1.9em}
+.dsw-editor .ce-header.h2{font-size:1.55em}
+.dsw-editor .ce-header.h3{font-size:1.3em}
+.dsw-editor .ce-header.h4{font-size:1.12em}
+.dsw-editor .ce-header.h5{font-size:1em}
+.dsw-editor .ce-header.h6{font-size:1em;font-style:italic}
+.dsw-editor .ce-toolbar__plus,.dsw-editor .ce-toolbar__settings-btn{color:var(--dsw-alias-label-secondary);border-radius:6px}
+.dsw-editor .ce-toolbar__plus:hover,.dsw-editor .ce-toolbar__settings-btn:hover{background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-primary)}
+.dsw-editor .ce-popover,.dsw-editor .ce-inline-toolbar,.dsw-editor .ce-settings{background:var(--dsw-alias-bg-layer-1);border:.5px solid var(--dsw-alias-border-l3);box-shadow:0 12px 32px rgba(0,0,0,.28);color:var(--dsw-alias-label-primary)}
+.dsw-editor .ce-popover-item,.dsw-editor .ce-inline-tool{color:var(--dsw-alias-label-primary)}
+.dsw-editor .ce-popover-item:hover:not(.ce-popover-item--no-hover),.dsw-editor .ce-inline-tool:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.dsw-editor .ce-popover-item__title,.dsw-editor .ce-popover__nothing-found-message{color:var(--dsw-alias-label-primary)}
+.dsw-editor .ce-popover__nothing-found-message{opacity:.7}
+.dsw-editor .ce-inline-toolbar{border-radius:8px}
+.dsw-editor .ce-inline-tool--active,.dsw-editor .ce-inline-tool--focused{color:var(--dsw-alias-state-accent,#4f8cff);background:var(--dsw-alias-interactive-bg-active)}
+.dsw-editor .cdx-search-field,.dsw-editor .ce-popover__search{background:var(--dsw-alias-bg-layer-2,transparent);color:var(--dsw-alias-label-primary);border:.5px solid var(--dsw-alias-border-l3)}
+.dsw-editor .cdx-search-field__input,.dsw-editor .ce-popover__search input{color:var(--dsw-alias-label-primary)}
+.dsw-editor [contenteditable]{outline:none}
+/* The block the model holds but the editor cannot draw as a page. */
+.dsw-editor .ce-delimiter:before{color:var(--dsw-alias-label-tertiary)}
+.dsw-editor .ce-code__textarea{background:var(--dsw-alias-bg-layer-2,transparent);color:var(--dsw-alias-label-primary);border:.5px solid var(--dsw-alias-border-l3);border-radius:6px}
+.dsw-editor .cdx-quote{border-left:2px solid var(--dsw-alias-border-l3);padding-left:12px}
+.dsw-editor .cdx-quote__text{min-height:0;margin-bottom:4px;font-style:italic}
+.dsw-editor .cdx-quote__caption{color:var(--dsw-alias-label-tertiary)}
+.dsw-editor .cdx-list{margin:0;padding:0 0 0 4px}
+/* The three marks Editor.js's own toolbar does not carry: this pack's own tools
+   stamp them on a span, and this is what makes them look like marks. */
+.dsw-editor [data-mark~=u]{text-decoration:underline}
+.dsw-editor [data-mark~=s]{text-decoration:line-through}
+.dsw-editor [data-mark~=code]{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.94em;padding:0 .2em;border-radius:3px;background:var(--dsw-alias-bg-layer-2,rgba(127,127,127,.14))}
 /* THE NEW-FILE DIALOG: a real dialog, centred over the tab, closed by Escape, a
    click outside, or the moment the file exists. */
 .dsw-dialogMask{position:absolute;inset:0;z-index:1100;display:flex;align-items:flex-start;justify-content:center;padding-top:12vh;background:rgba(0,0,0,.32)}
@@ -1009,21 +1391,24 @@ window.__ModuleLoader__.load({
     }
 
     function ToolButton(props) {
-      return h(
-        'button',
-        {
-          type: 'button',
-          className: 'dsw-btn' + (props.className ? ' ' + props.className : ''),
-          title: props.title,
-          'data-action': props.action,
-          'data-active': props.active === true ? 'true' : 'false',
-          'data-emphasis': props.emphasis,
-          disabled: props.disabled === true,
-          onMouseDown: props.onMouseDown,
-          onClick: props.onClick,
-        },
-        props.children,
-      )
+      const attributes = {
+        type: 'button',
+        className: 'dsw-btn' + (props.className ? ' ' + props.className : ''),
+        title: props.title,
+        'data-action': props.action,
+        'data-active': props.active === true ? 'true' : 'false',
+        'data-emphasis': props.emphasis,
+        disabled: props.disabled === true,
+        onMouseDown: props.onMouseDown,
+        onClick: props.onClick,
+      }
+      // Any `data-*` a caller passes rides through, so the button that COUNTS for a
+      // check (`data-writing-new`) can be the button that acts - a check asserting a
+      // marker a person clicks is worth more than one asserting a marker beside it.
+      for (const [key, value] of Object.entries(props)) {
+        if (key.startsWith('data-') && value !== undefined && value !== null) attributes[key] = value
+      }
+      return h('button', attributes, props.children)
     }
 
     /**
@@ -1388,10 +1773,15 @@ window.__ModuleLoader__.load({
       /**
        * Save the open document. `force` skips the revision check, which is what
        * "Keep mine" means when the host answered 409.
+       *
+       * The editor is read FIRST (`readLive`): a keystroke that has not reached
+       * `onChange` yet is still a keystroke somebody made, and saving the model as it
+       * stood would drop it. `readLive` never throws - it answers the model this side
+       * already has.
        */
       const save = useCallback(
         async (options = {}) => {
-          const current = docRef.current
+          const current = await readLive()
           if (!session || !current) return false
           if (options.silent !== true) setStatus({ kind: 'info', text: 'Saving\u2026' })
           try {
@@ -1417,6 +1807,7 @@ window.__ModuleLoader__.load({
               throw new Error((payload && payload.error && payload.error.message) || 'save failed (' + response.status + ')')
             }
             const payload = await response.json()
+            liveRef.current = payload.document
             applyDoc(payload.document)
             setDirty(false)
             dirtyRef.current = false
@@ -1490,7 +1881,7 @@ window.__ModuleLoader__.load({
       )
 
       /**
-       * Create a REAL file in the conversation folder.
+       * Create a REAL file on the Desktop of the machine running the harness.
        *
        * The name is asked in the tab's OWN dialog (`namePrompt`), not with
        * `window.prompt`: the browser's prompt is a modal the page cannot style,
@@ -1498,7 +1889,8 @@ window.__ModuleLoader__.load({
        * made. The dialog confirms ONCE and the file starts - which is the whole
        * of what "New" should be.
        *
-       * @param format - `'docx'`, `'xlsx'`, `'md'` or `'txt'`.
+       * @param format - `'docx'` (what the bar's New button asks for), or `'xlsx'`,
+       *   `'md'` or `'txt'`.
        * @param name - the name to create (already confirmed by the dialog).
        * @returns the created file's payload, or null.
        */
@@ -1507,7 +1899,7 @@ window.__ModuleLoader__.load({
           if (!session) return null
           try {
             setStatus({ kind: 'info', text: 'Creating ' + name + '\u2026' })
-            const response = await postJson(CREATE_FILE_ROUTE, { session, format, name, by: 'user' })
+            const response = await postJson(CREATE_FILE_ROUTE, { session, format, name, by: 'user', target: 'desktop' })
             const payload = await response.json().catch(() => null)
             if (!response.ok) throw new Error((payload && payload.error && payload.error.message) || 'could not create the file (' + response.status + ')')
             // The dialog is gone the moment the file exists: one action, one result.
@@ -1536,7 +1928,7 @@ window.__ModuleLoader__.load({
             }
             openDocument(payload.document)
             setPhase('ready')
-            setStatus({ kind: 'info', text: 'Created ' + payload.name })
+            setStatus({ kind: 'info', text: 'Created ' + payload.name + (payload.dir ? ' in ' + payload.dir : '') })
             await refresh()
             return payload
           } catch (err) {
@@ -1547,15 +1939,25 @@ window.__ModuleLoader__.load({
         [openDocument, refresh, session],
       )
 
-      /** Open the tab's own New-file dialog, with the name it should suggest. */
+      /**
+       * Open the tab's own New-file dialog, with the name it should suggest.
+       *
+       * A DOCUMENT is what this tab makes, and a `.docx` is what the editor writes,
+       * so the extension is fixed and shown beside the field rather than offered as a
+       * choice - the workbook has its own surface in the right bar and its own route
+       * (`create-file` with `xlsx`), which is where it belongs.
+       */
       const askForFile = useCallback(
         (format) => {
-          const extension = format === 'xlsx' ? '.xlsx' : format === 'docx' ? '.docx' : format === 'md' ? '.md' : '.txt'
+          const extension = format === 'xlsx' ? '.xlsx' : format === 'md' ? '.md' : format === 'txt' ? '.txt' : '.docx'
           const base = format === 'xlsx' ? 'Spreadsheet' : 'Document'
           setNamePrompt({ format, value: base + extension, extension, title: 'New ' + (format === 'xlsx' ? 'spreadsheet' : 'document') })
         },
         [],
       )
+
+      /** The bar's New button: one action, the file this tab actually writes. */
+      const newDocument = useCallback(() => askForFile('docx'), [askForFile])
 
       /** Delete the open document. */
       const remove = useCallback(
@@ -1655,37 +2057,47 @@ window.__ModuleLoader__.load({
        * office preview.
        *
        * This is the whole LibreOffice story in one function: the tab writes a
-       * real `.docx` into the conversation folder, and core's own preview - whose
-       * `docx` body converts with the harness's bundled LibreOffice - renders it
-       * in the right bar. The preview's KIND is read out of the tab-type registry
-       * rather than hardcoded, so a harness line that renames it cannot turn this
-       * button into a dead one.
+       * real `.docx` onto the Desktop of the machine running the harness, and core's
+       * own preview - whose `docx` body converts with the harness's bundled
+       * LibreOffice - renders a workspace copy of it in the right bar. The preview's
+       * KIND is read out of the tab-type registry rather than hardcoded, so a
+       * harness line that renames it cannot turn this button into a dead one.
        */
       const exportDocument = useCallback(
         async (format, options = {}) => {
           const current = docRef.current
           if (!session || !current) return null
-          setStatus({ kind: 'info', text: 'Exporting\u2026' })
+          // EVERY export lands on the DESKTOP of the machine running the harness -
+          // that is where a person looks for a file they just asked for, and the file
+          // is the whole point of the button. A proof also asks the host for a copy
+          // inside the conversation folder, because core's document preview can only
+          // read a workspace address; the desktop file is the one that stays.
+          const proof = options.proof === true
+          setStatus({ kind: 'info', text: proof ? 'Exporting and rendering\u2026' : 'Exporting\u2026' })
           try {
             if (dirtyRef.current) await save({ silent: true })
             const response = await postJson(EXPORT_ROUTE, {
               session,
               id: current.id,
               format,
-              target: options.target === 'desktop' ? 'desktop' : 'workspace',
+              target: 'desktop',
               name: options.name,
+              proof,
             })
             const payload = await response.json().catch(() => null)
             if (!response.ok) throw new Error((payload && payload.error && payload.error.message) || 'export failed (' + response.status + ')')
             setExported(payload)
-            if (options.proof === true) {
-              const opened = openInPreview(payload.path)
+            if (proof) {
+              const where = payload.dir ? ' to ' + payload.dir : ''
+              const opened = payload.previewPath ? openInPreview(payload.previewPath) : false
               setStatus({
                 kind: opened ? 'info' : 'warn',
-                text: opened ? 'Exported ' + payload.name + ' \u2014 LibreOffice is rendering it in the right bar' : 'Exported ' + payload.name + ' to the conversation folder (the right bar is not mounted)',
+                text: opened
+                  ? 'Exported ' + payload.name + where + ' \u2014 LibreOffice is rendering it in the right bar'
+                  : 'Exported ' + payload.name + where + (payload.previewPath ? ' (the right bar is not mounted, so nothing is rendering it)' : ' (nothing to render)'),
               })
             } else {
-              setStatus({ kind: 'info', text: 'Exported ' + payload.name })
+              setStatus({ kind: 'info', text: 'Exported ' + payload.name + (payload.dir ? ' to ' + payload.dir : '') })
             }
             return payload
           } catch (err) {
@@ -1871,689 +2283,370 @@ window.__ModuleLoader__.load({
         },
         [save],
       )
-
       // ---------------------------------------------------------------------
-      // The page surface as the editor sees it: fragments, carets and selection
+      // The editor surface: one Editor.js instance, one document at a time
       //
-      // A block may be rendered as SEVERAL fragments (one per page), so every
-      // position is a pair `{ source, offset }` - a block index and a character
-      // offset INTO that block - and the DOM is only ever a view of it. This is
-      // the layer that keeps that promise: read a fragment, splice it back, find
-      // the fragment a position lives in, and put a caret or a selection there.
+      // The editor OWNS what is on screen while a document is open, and the model
+      // follows it: `liveRef` holds what the editor last said it holds, and a save
+      // reads the editor itself first, so what is written is never one keystroke
+      // behind. A document that arrives from the store or from a `.docx` is pushed
+      // INTO the editor (`render`), and a document this tab created or saved is
+      // pushed the same way - so there is exactly one direction of surprise.
       // ---------------------------------------------------------------------
 
-      /** Every fragment element on screen, in document order (page by page). */
-      const allFragments = useCallback(() => {
-        const root = pagesRef.current
-        if (!root || typeof root.querySelectorAll !== 'function') return []
-        return Array.from(root.querySelectorAll('[data-block]'))
-      }, [])
+      /** The mounted editor, and what it holds. */
+      const editorRef = useRef(null)
+      const liveRef = useRef(null)
+      /** The document id the mounted editor was last rendered with. */
+      const shownIdRef = useRef(null)
+      /** The element Editor.js draws into. */
+      const hostRef = useRef(null)
+      /** Whether the editor is installed, and why not when it is not. */
+      const [editorState, setEditorState] = useState('idle')
+      const [editorError, setEditorError] = useState('')
+      /** The pending re-read of the editor, so a keystroke is not a translation of
+       *  the whole document (and the timer is cleared when the editor is destroyed). */
+      const syncTimer = useRef(null)
 
-      /** One fragment's own facts, read out of the attributes it was rendered with. */
-      const fragmentInfo = useCallback((element) => {
-        if (!element || typeof element.getAttribute !== 'function') return null
-        const raw = element.getAttribute('data-block')
-        if (raw === null) return null
-        const to = element.getAttribute('data-to')
-        return {
-          source: Number(raw),
-          from: Number(element.getAttribute('data-from') || 0),
-          to: to === null || to === '' ? null : Number(to),
-          length: charCount(element),
+      /**
+       * What the editor holds NOW, as a model document.
+       *
+       * `editor.saver.save()` is async, and it throws on a half-initialised instance -
+       * so this is the one place that call is made, and a throw becomes the model
+       * that was already current rather than a lost save. The page break and
+       * typography losses the editor reports are merged with the ones the `.docx`
+       * importer reported, because the tab has one banner.
+       */
+      const readLive = useCallback(async () => {
+        const editor = editorRef.current
+        const current = liveRef.current ?? docRef.current
+        if (!current) return null
+        if (!editor || typeof editor.saver?.save !== 'function') return current
+        try {
+          const data = await editor.saver.save()
+          const converted = fromEditorData(data)
+          const next = { ...current, blocks: converted.blocks, editorLosses: converted.losses }
+          liveRef.current = next
+          return next
+        } catch (err) {
+          setStatus({ kind: 'warn', text: 'The editor did not answer: ' + messageOf(err) })
+          return current
         }
       }, [])
+      /**
+       * Re-read the editor into the model WITHOUT saving.
+       *
+       * The word count, the headings navigator and the loss banner all read the model,
+       * so without this they would answer to the last save rather than to what has
+       * been typed. It never throws (`readLive` answers the current model instead) and
+       * it never re-renders the editor, because the effect that renders is keyed on
+       * the document's identity rather than on the model object.
+       */
+      const syncFromEditor = useCallback(async () => {
+        const next = await readLive()
+        if (next) applyDoc(next)
+      }, [applyDoc, readLive])
 
-      /** Is this fragment the WHOLE of its block (the common case)? */
-      const isWholeFragment = useCallback(
-        (info) => {
-          if (!info) return false
-          const block = docRef.current ? docRef.current.blocks[info.source] : null
-          if (!block) return false
-          const length = runsLength(block.runs)
-          return info.from === 0 && (info.to === null || info.to >= length)
+      // ---------------------------------------------------------------------
+      // The vendored Editor.js surface
+      // ---------------------------------------------------------------------
+
+      /**
+       * Load the pinned UMD files, in order, each as a `<script>` appended to the
+       * head - the same files the routes serve, hashed in `lib/vendor/editorjs/`.
+       *
+       * A file that does not arrive is NOT a dead tab: the editor mounts with
+       * whichever tools did load, and the status bar names the missing ones. That
+       * matters more than it sounds: the paragraph tool is this package's own
+       * (below), so a tool failure leaves a document that can still be typed in and
+       * saved rather than a blank column.
+       *
+       * @returns `{ missing, skipped }` - the files that failed, and their names.
+       */
+      const loadEditorSurface = useCallback(async () => {
+        const win = typeof window === 'undefined' ? null : window
+        if (!win) return { missing: EDITOR_SCRIPTS.map((entry) => entry.file), skipped: [] }
+        const missing = []
+        for (const entry of EDITOR_SCRIPTS) {
+          if (typeof win[entry.global] === 'function') continue
+          const loaded = await new Promise((resolve) => {
+            const tag = document.createElement('script')
+            tag.src = EDITOR_ROUTE + entry.file
+            tag.async = false
+            let settled = false
+            const done = (ok) => {
+              if (settled) return
+              settled = true
+              resolve(ok)
+            }
+            tag.onload = () => done(true)
+            tag.onerror = () => done(false)
+            document.head.appendChild(tag)
+            // A route that never answers must not hang the tab: this is the
+            // difference between "the browser is slow" and "this never loads".
+            setTimeout(() => done(false), EDITOR_LOAD_MS)
+          })
+          if (!loaded || typeof win[entry.global] !== 'function') missing.push(entry.file)
+        }
+        const skipped = missing
+          .filter((file) => file !== 'editorjs.umd.js' && file !== 'paragraph.umd.js')
+          .map((file) => file.replace('.umd.js', ''))
+        return { missing, skipped }
+      }, [])
+
+      /**
+       * THIS PACKAGE'S OWN TEXT TOOL.
+       *
+       * Editor.js's stock paragraph renders a contenteditable and saves its
+       * `innerHTML` - which is exactly the shape this model needs, so the tool is
+       * small on purpose: it renders the pack's marks (`markHtml`) and reads them
+       * back (`runsFromHtmlString`) on save.
+       *
+       * `data-mark` is declared in `sanitize` so a paste and the browser's own
+       * editing keep the attribute instead of stripping it.
+       *
+       * @param tagName - the element the editable is.
+       * @param options - `{ className, title }`.
+       */
+      function makeTextTool(tagName, options = {}) {
+        const className = options.className ?? 'ce-paragraph'
+        const title = options.title ?? 'Text'
+        return class PackTextTool {
+          static get isReadOnlySupported() {
+            return true
+          }
+
+          static get sanitize() {
+            return { text: { br: true, span: { 'data-mark': true, style: true }, b: true, i: true, u: true, s: true, code: true } }
+          }
+
+          static get toolbox() {
+            return { title, icon: '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M1 2h10v2H7v7H5V4H1z"/></svg>' }
+          }
+
+          constructor({ data, api, readOnly }) {
+            this.data = data && typeof data === 'object' ? data : { text: '' }
+            this.api = api
+            this.readOnly = readOnly === true
+          }
+
+          render() {
+            const element = document.createElement(tagName)
+            element.className = className
+            element.setAttribute('data-placeholder', 'Type something, or press Tab for a block')
+            element.contentEditable = this.readOnly ? 'false' : 'true'
+            // The editor's own write path is HTML, and this is the HTML this pack's
+            // reader understands - an empty run is still one break, which is what
+            // gives an empty block a caret to sit in.
+            element.innerHTML = typeof this.data.text === 'string' && this.data.text.length > 0 ? this.data.text : '<br>'
+            return element
+          }
+
+          save(element) {
+            return { text: element.innerHTML }
+          }
+        }
+      }
+
+      const PackParagraph = makeTextTool('div')
+
+      /** The heading levels the block's own tune offers, in order. */
+      const HEADING_LEVELS = [1, 2, 3, 4, 5, 6]
+
+      /**
+       * THE PACKAGE'S OWN HEADER TOOL.
+       *
+       * A paragraph with a LEVEL, and a level is an OPTION this tool offers rather
+       * than a fixed type: Editor.js's own header ships a "convert to" submenu that
+       * switches an existing block between H1 and H6, and replacing that tool with a
+       * plain `h2` - which is what this package used to do - takes that control away
+       * and leaves a document whose only heading is a Heading 2.
+       *
+       * The element is a `div` with the editor's own `ce-header` class and the
+       * heading classes the header tool's CSS sizes (`h1`..`h6`), because Headings 1
+       * through 6 in one element name would be six element names for one tool. The
+       * model still writes a real `<w:pStyle w:val="HeadingN">` into the `.docx`:
+       * the level is data, and it is the data that matters.
+       */
+      class PackHeader extends makeTextTool('div', { className: 'ce-header', title: 'Heading' }) {
+        constructor(options) {
+          super(options)
+          const level = Number(this.data.level)
+          this.level = Number.isFinite(level) ? Math.max(1, Math.min(6, Math.round(level))) : 2
+        }
+
+        render() {
+          const element = super.render()
+          this.applyLevel(element, this.level)
+          return element
+        }
+
+        /** Wear the level the model carries, on the element and as data. */
+        applyLevel(element, level) {
+          for (const className of ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']) element.classList.remove(className)
+          element.classList.add('h' + level)
+          element.setAttribute('data-level', String(level))
+        }
+
+        save(element) {
+          return { text: element.innerHTML, level: this.level }
+        }
+
+        renderSettings() {
+          return HEADING_LEVELS.map((level) => ({
+            icon: '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><circle cx="6" cy="6" r="5"/></svg>',
+            label: 'Heading ' + level,
+            isActive: level === this.level,
+            closeOnActivate: true,
+            onActivate: () => {
+              this.level = level
+              const element = this.toolRenderedElement ?? null
+              if (element && typeof this.applyLevel === 'function') this.applyLevel(element, level)
+            },
+          }))
+        }
+      }
+
+      /**
+       * Build the editor, once, on the holder this tab owns.
+       *
+       * The paragraph is this pack's tool and so is the header (so a heading keeps
+       * its marks); the list, quote and code blocks are the vendored tools. A tool
+       * that did not load is simply absent from the map - Editor.js renders a block
+       * of a missing type as a paragraph, so the TEXT survives an incomplete
+       * surface rather than being lost with it.
+       */
+      const buildEditor = useCallback(() => {
+        const host = hostRef.current
+        const win = typeof window === 'undefined' ? null : window
+        if (!host || !win || typeof win.EditorJS !== 'function') {
+          setEditorError('the vendored Editor.js core did not load (build it with `node packages/dsh-writing/vendor/editorjs/build.mjs`)')
+          setEditorState('error')
+          return null
+        }
+        const tools = { paragraph: PackParagraph, header: PackHeader }
+        if (typeof win.EditorjsList === 'function') tools.list = win.EditorjsList
+        if (typeof win.Quote === 'function') tools.quote = win.Quote
+        if (typeof win.Code === 'function') tools.code = win.Code
+        const current = liveRef.current ?? docRef.current
+        let instance = null
+        try {
+          instance = new win.EditorJS({
+            holder: host,
+            tools,
+            data: toEditorData(current ?? { blocks: [] }),
+            inlineToolbar: EDITOR_INLINE_TOOLS,
+            // The pack's own surface is the tab, so the style picker is off: a
+            // document's typography belongs to the Document menu (and to the
+            // `.docx`), not to a control that writes an inline style per block.
+            onChange: () => {
+              setDirty(true)
+              dirtyRef.current = true
+              const editor = editorRef.current
+              const index = editor && editor.blocks && typeof editor.blocks.getCurrentBlockIndex === 'function' ? editor.blocks.getCurrentBlockIndex() : -1
+              if (index >= 0) setActiveIndex(index)
+              // THE MODEL FOLLOWS THE EDITOR, not just the save. What the editor says
+              // it holds is read here and merged into the document, so the word
+              // count, the headings navigator and the loss banner answer to what has
+              // been typed rather than to the last time it was written to disk. The
+              // merge is NOT a re-render of the editor (the effect that renders is
+              // keyed on the document's identity), so the caret stays where the
+              // person put it. It is debounced because a keystroke is not a reason to
+              // translate the whole document.
+              if (syncTimer.current !== null) clearTimeout(syncTimer.current)
+              syncTimer.current = setTimeout(() => {
+                syncTimer.current = null
+                void syncFromEditor()
+              }, SYNC_MS)
+            },
+          })
+        } catch (err) {
+          setEditorError(messageOf(err))
+          setEditorState('error')
+          return null
+        }
+        editorRef.current = instance
+        return instance
+      }, [])
+
+      // Mount the editor once the scripts are there, and render a DIFFERENT
+      // document into it. The dependency is deliberately the document's IDENTITY
+      // (`id` plus the `epoch` tick `openDocument` bumps), never the model object
+      // this half keeps manufacturing: re-rendering on every model change would put
+      // the caret back to the top of the document on every save.
+      useEffect(() => {
+        if (!doc || !doc.id || typeof window === 'undefined') return undefined
+        let cancelled = false
+        const start = async () => {
+          setEditorState('loading')
+          setEditorError('')
+          const surface = await loadEditorSurface()
+          if (cancelled) return
+          if (surface.missing.indexOf('editorjs.umd.js') !== -1) {
+            setEditorError('the vendored Editor.js core did not load (build it with `node packages/dsh-writing/vendor/editorjs/build.mjs`)')
+            setEditorState('error')
+            return
+          }
+          if (surface.skipped.length > 0) {
+            setStatus({ kind: 'warn', text: 'The editor is missing the ' + surface.skipped.join(', ') + ' tool(s): their blocks show as text.' })
+          }
+          if (!editorRef.current) buildEditor()
+          if (!editorRef.current) return
+          if (shownIdRef.current !== doc.id) {
+            shownIdRef.current = doc.id
+            try {
+              setEditorState('rendering')
+              await editorRef.current.render(toEditorData(doc))
+              if (!cancelled) {
+                liveRef.current = doc
+                setEditorState('ready')
+              }
+            } catch (err) {
+              if (!cancelled) {
+                setEditorError(messageOf(err))
+                setEditorState('error')
+              }
+            }
+            return
+          }
+          liveRef.current = liveRef.current ?? doc
+          if (!cancelled) setEditorState('ready')
+        }
+        void start()
+        return () => {
+          cancelled = true
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, [doc ? doc.id : null, epoch, buildEditor, loadEditorSurface])
+
+      /** Tear the editor down on unmount. Editor.js throws on a double destroy. */
+      useEffect(
+        () => () => {
+          if (syncTimer.current !== null) {
+            clearTimeout(syncTimer.current)
+            syncTimer.current = null
+          }
+          const editor = editorRef.current
+          editorRef.current = null
+          if (editor && typeof editor.destroy === 'function') {
+            try {
+              editor.destroy()
+            } catch (err) {
+              /* a destroy that threw is a leak, not a failure of the tab */
+            }
+          }
         },
         [],
       )
 
-      /** The fragment element one (block, offset) position lives in. */
-      const fragmentForOffset = useCallback(
-        (source, offset) => {
-          const fragments = allFragments()
-          let last = null
-          for (const element of fragments) {
-            const info = fragmentInfo(element)
-            if (!info || info.source !== source) continue
-            const end = info.to === null ? info.from + info.length : info.to
-            if (offset >= info.from && offset <= end) return { element, local: offset - info.from, info }
-            last = { element, local: info.length, info }
-          }
-          return last
-        },
-        [allFragments, fragmentInfo],
-      )
-
-      /** Put the caret (or a selection) at one or two model positions. */
-      const placeCaret = useCallback(
-        (from, to) => {
-          const start = fragmentForOffset(from.source, from.offset)
-          if (!start) return
-          const end = to ? fragmentForOffset(to.source, to.offset) : start
-          try {
-            if (typeof start.element.focus === 'function') start.element.focus()
-            if (end && end.element !== start.element && typeof window !== 'undefined' && window.getSelection && document.createRange) {
-              // A selection that spans fragments (or pages) is a RANGE over the
-              // document, not over one editable: that is what lets a person
-              // select a paragraph that a page boundary runs through.
-              const range = document.createRange()
-              const first = locateOffset(start.element, start.local) || { node: start.element, offset: 0 }
-              const last = locateOffset(end.element, end.local) || { node: end.element, offset: end.element.childNodes.length }
-              range.setStart(first.node, first.offset)
-              range.setEnd(last.node, last.offset)
-              const selection = window.getSelection()
-              selection.removeAllRanges()
-              selection.addRange(range)
-              return
-            }
-            setCaretOffsets(start.element, start.local, start.local)
-          } catch (err) {
-            /* a caret we could not restore is a caret the next click fixes */
-          }
-        },
-        [fragmentForOffset],
-      )
-
-      /** The model positions of the current selection, clipped to each fragment. */
-      const selectedTargets = useCallback(() => {
-        try {
-          if (typeof window === 'undefined' || !window.getSelection) return null
-          const selection = window.getSelection()
-          if (!selection || selection.rangeCount === 0) return null
-          const range = selection.getRangeAt(0)
-          const out = []
-          for (const element of allFragments()) {
-            const info = fragmentInfo(element)
-            if (!info) continue
-            const intersects =
-              typeof range.intersectsNode === 'function'
-                ? range.intersectsNode(element)
-                : element.contains(range.startContainer) || element.contains(range.endContainer)
-            if (!intersects) continue
-            const startLocal = element.contains(range.startContainer) ? offsetWithin(element, range.startContainer, range.startOffset) : 0
-            const endLocal = element.contains(range.endContainer) ? offsetWithin(element, range.endContainer, range.endOffset) : info.length
-            out.push({ source: info.source, start: info.from + (startLocal ?? 0), end: info.from + (endLocal ?? info.length) })
-          }
-          return out.length > 0 ? out : null
-        } catch (err) {
-          return null
-        }
-      }, [allFragments, fragmentInfo])
-
-      /** Select the WHOLE document, across every page - what Ctrl+A means here. */
-      const selectAll = useCallback(() => {
-        try {
-          const fragments = allFragments()
-          if (fragments.length === 0 || typeof document.createRange !== 'function' || !window.getSelection) return
-          const first = fragments[0]
-          const last = fragments[fragments.length - 1]
-          const range = document.createRange()
-          range.setStart(first, 0)
-          range.setEnd(last, last.childNodes ? last.childNodes.length : 0)
-          const selection = window.getSelection()
-          selection.removeAllRanges()
-          selection.addRange(range)
-          refreshToolbarState()
-        } catch (err) {
-          /* a browser that will not take the range leaves the browser's own Ctrl+A */
-        }
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [allFragments])
-
-      /** The whole surface re-read into blocks: a multi-block edit landed somewhere. */
-      const blocksFromDom = useCallback(() => {
-        const current = docRef.current
-        if (!current) return null
-        const fragments = []
-        for (const element of allFragments()) {
-          const info = fragmentInfo(element)
-          if (info) fragments.push({ ...info, runs: runsFromNodes(nodesFromDom(element)) })
-        }
-        if (fragments.length === 0) return current.blocks
-        const bySource = new Map()
-        for (const fragment of fragments) {
-          const list = bySource.get(fragment.source)
-          if (list) list.push(fragment)
-          else bySource.set(fragment.source, [fragment])
-        }
-        return current.blocks.map((block, index) => {
-          const list = bySource.get(index)
-          if (!list) return block
-          if (list.length === 1 && list[0].from === 0 && (list[0].to === null || list[0].to >= blockLength(block.runs))) {
-            return { ...block, runs: list[0].runs }
-          }
-          let runs = block.runs
-          for (const fragment of list) runs = replaceRange(runs, fragment.from, fragment.to, fragment.runs)
-          return { ...block, runs }
-        })
-      }, [allFragments, fragmentInfo])
-
-      /** The caret's own position as a model pair, or null when it is elsewhere. */
-      const currentPosition = useCallback(() => {
-        try {
-          if (typeof window === 'undefined' || !window.getSelection) return null
-          const selection = window.getSelection()
-          if (!selection || selection.rangeCount === 0) return null
-          const range = selection.getRangeAt(0)
-          for (const element of allFragments()) {
-            if (!element.contains(range.startContainer)) continue
-            const info = fragmentInfo(element)
-            const local = offsetWithin(element, range.startContainer, range.startOffset)
-            if (!info || local === null) return null
-            return { source: info.source, offset: info.from + local, info }
-          }
-          return null
-        } catch (err) {
-          return null
-        }
-      }, [allFragments, fragmentInfo])
-
-      /** What the toolbar should highlight, from wherever the caret is. */
-      const refreshToolbarState = useCallback(() => {
-        const position = currentPosition()
-        if (!position) return
-        const block = docRef.current ? docRef.current.blocks[position.source] : null
-        if (!block) return
-        setActiveIndex(position.source)
-        setActiveMarks(marksAt(block.runs, position.offset))
-        const properties = propertiesAt(block.runs, position.offset)
-        setActiveProperties({ font: properties.font, size: properties.size })
-      }, [currentPosition])
-
-      // ---------------------------------------------------------------------
-      // The caret, restored after a structural re-render
-      // ---------------------------------------------------------------------
-      useEffect(() => {
-        const pending = pendingCaret.current
-        if (!pending) return
-        pendingCaret.current = null
-        placeCaret(pending.from, pending.to)
-      })
-
-      // ---------------------------------------------------------------------
-      // Which marks the toolbar shows as active
-      // ---------------------------------------------------------------------
-      useEffect(() => {
-        if (typeof document === 'undefined' || typeof document.addEventListener !== 'function') return undefined
-        const onSelectionChange = () => refreshToolbarState()
-        document.addEventListener('selectionchange', onSelectionChange)
-        return () => {
-          if (typeof document.removeEventListener === 'function') document.removeEventListener('selectionchange', onSelectionChange)
-        }
-      }, [refreshToolbarState])
-
-      /** The active block index, readable from a listener that closes over nothing. */
-      // ---------------------------------------------------------------------
-      // The model edits
-      // ---------------------------------------------------------------------
-      /** Replace the block list, re-render the structure and put the caret back. */
-      const commitBlocks = useCallback(
-        (blocks, caret) => {
-          const current = docRef.current
-          if (!current) return
-          applyDoc({ ...current, blocks })
-          setDirty(true)
-          dirtyRef.current = true
-          if (caret) {
-            pendingCaret.current = {
-              from: { source: caret.index, offset: caret.start ?? 0 },
-              to: { source: caret.index, offset: caret.end ?? caret.start ?? 0 },
-            }
-          }
-          setEpoch((value) => value + 1)
-        },
-        [applyDoc],
-      )
-
-      /**
-       * Typing: the DOM is the truth for the fragment that changed, and the model
-       * follows it.
-       *
-       * Two paths, and the difference is a page boundary: an edit inside a whole
-       * block touches exactly one block (`sliceRuns` puts it back where it was),
-       * while an edit that crossed a fragment - a multi-block delete, a paste, a
-       * selection spanning a page break - is put back by reading the whole
-       * surface, because the model is the only thing that knows how the fragments
-       * of one block fit together.
-       */
-      const onBlockInput = useCallback(
-        (event) => {
-          const current = docRef.current
-          const element = event && event.currentTarget ? event.currentTarget : null
-          if (!current || !element) return
-          const info = fragmentInfo(element)
-          if (!info) return
-          const block = current.blocks[info.source]
-          if (!block) return
-          const offsets = caretOffsets(element)
-          const collapsedInside = offsets !== null
-          if (collapsedInside && isWholeFragment(info)) {
-            const runs = runsFromNodes(nodesFromDom(element))
-            const blocks = current.blocks.slice()
-            blocks[info.source] = { ...block, runs }
-            // NO epoch bump: the structure did not change, so React must not
-            // touch the node the caret is in.
-            applyDoc({ ...current, blocks })
-          } else {
-            const position = currentPosition()
-            const blocks = blocksFromDom()
-            if (!blocks) return
-            applyDoc({ ...current, blocks })
-            if (position) {
-              pendingCaret.current = {
-                from: { source: position.source, offset: position.offset },
-                to: { source: position.source, offset: position.offset },
-              }
-            }
-            setEpoch((value) => value + 1)
-          }
-          setDirty(true)
-          dirtyRef.current = true
-          refreshToolbarState()
-        },
-        [applyDoc, blocksFromDom, currentPosition, fragmentInfo, isWholeFragment, refreshToolbarState],
-      )
-
-      /** Toggle one inline mark over the selection (or the block, when collapsed). */
-      const toggleMark = useCallback(
-        (mark) => {
-          const current = docRef.current
-          const index = activeIndexRef.current
-          if (!current || index === null) return
-          const block = current.blocks[index]
-          if (!block) return
-          const targets = selectedTargets()
-          // A selection that spans blocks or pages marks EVERY range it covers,
-          // which is what a person expects from Ctrl+B over three paragraphs.
-          const ranges =
-            targets && targets.length > 1
-              ? targets
-              : [
-                  {
-                    source: index,
-                    start: targets && targets.length === 1 ? targets[0].start : 0,
-                    end: targets && targets.length === 1 ? targets[0].end : runsLength(block.runs),
-                  },
-                ]
-          const whole = ranges.length === 1 && ranges[0].start === 0 && ranges[0].end >= runsLength(block.runs)
-          if (whole) setStatus({ kind: 'info', text: 'No selection: the mark applies to the whole block.' })
-          const blocks = current.blocks.slice()
-          for (const range of ranges) {
-            const target = blocks[range.source]
-            if (!target) continue
-            blocks[range.source] = { ...target, runs: applyMarkToRuns(target.runs, range.start, range.end, mark) }
-          }
-          const first = ranges[0]
-          const last = ranges[ranges.length - 1]
-          commitBlocks(blocks, { index: first.source, start: first.start, end: last.end })
-        },
-        [commitBlocks, selectedTargets],
-      )
-
-      /**
-       * Set the family or the size over the selection (or the whole block when
-       * there is none) - the same rule the marks use, so there is one thing to
-       * learn: a toolbar control with nothing selected acts on the block.
-       */
-      const applyAttribute = useCallback(
-        (key, value) => {
-          const current = docRef.current
-          const index = activeIndexRef.current
-          if (!current || index === null) return
-          const block = current.blocks[index]
-          if (!block) return
-          const targets = selectedTargets()
-          const ranges =
-            targets && targets.length > 1
-              ? targets
-              : [
-                  {
-                    source: index,
-                    start: targets && targets.length === 1 ? targets[0].start : 0,
-                    end: targets && targets.length === 1 ? targets[0].end : runsLength(block.runs),
-                  },
-                ]
-          const whole = ranges.length === 1 && ranges[0].start === 0 && ranges[0].end >= runsLength(block.runs)
-          if (whole) setStatus({ kind: 'info', text: 'No selection: ' + (key === 'font' ? 'the font' : 'the size') + ' applies to the whole block.' })
-          const blocks = current.blocks.slice()
-          for (const range of ranges) {
-            const target = blocks[range.source]
-            if (!target) continue
-            blocks[range.source] = { ...target, runs: applyAttributeToRuns(target.runs, range.start, range.end, key, value) }
-          }
-          const first = ranges[0]
-          const last = ranges[ranges.length - 1]
-          commitBlocks(blocks, { index: first.source, start: first.start, end: last.end })
-        },
-        [commitBlocks, selectedTargets],
-      )
-
-      /**
-       * The document's own default family and size - what a run with no font of
-       * its own inherits. One write, and the whole page changes, which is what
-       * "pick a font for this document" has to mean.
-       */
-      const setDocumentTypography = useCallback(
-        (patch) => {
-          const current = docRef.current
-          if (!current) return
-          applyDoc({
-            ...current,
-            font: patch.font !== undefined ? patch.font : current.font,
-            fontSize: patch.fontSize !== undefined ? patch.fontSize : current.fontSize,
-          })
-          setDirty(true)
-          dirtyRef.current = true
-          setEpoch((value) => value + 1)
-        },
-        [applyDoc],
-      )
-
-      /** This document's headings, for the navigator. */
-      const headings = useMemo(() => {
-        if (!doc) return []
-        return doc.blocks
-          .map((block, index) =>
-            block.type === 'heading' ? { index, level: block.level ?? 1, text: block.runs.map((run) => run.text).join('') || '(untitled heading)' } : null,
-          )
-          .filter(Boolean)
-      }, [doc, epoch])
-
-      /** Show one heading: scroll to its block and put the caret in it. */
-      const jumpTo = useCallback(
-        (index) => {
-          const found = fragmentForOffset(index, 0)
-          if (!found) return
-          if (typeof found.element.scrollIntoView === 'function') found.element.scrollIntoView({ block: 'center' })
-          placeCaret({ source: index, offset: 0 }, null)
-        },
-        [fragmentForOffset, placeCaret],
-      )
-      // The outline pane reaches the editor through FOCUS_LISTENERS, which is
-      // registered once - so it calls the LATEST jump through a ref instead of
-      // holding a stale one.
-      const jumpToRef = useRef(jumpTo)
-      jumpToRef.current = jumpTo
-
-      /** Give the active block a type, a list kind or an alignment. */
-      const retype = useCallback(
-        (type, level, ordered) => {
-          const current = docRef.current
-          const index = activeIndexRef.current
-          if (!current || index === null) return
-          const position = currentPosition()
-          const blocks = current.blocks.slice()
-          blocks[index] = retypeBlock(blocks[index], type, level, ordered)
-          commitBlocks(blocks, position ? { index, start: position.offset, end: position.offset } : null)
-        },
-        [commitBlocks, currentPosition],
-      )
-
-      /** Set the alignment of the active block. */
-      const setAlign = useCallback(
-        (align) => {
-          const current = docRef.current
-          const index = activeIndexRef.current
-          if (!current || index === null) return
-          const position = currentPosition()
-          const blocks = current.blocks.slice()
-          const block = { ...blocks[index] }
-          if (align === null) delete block.align
-          else block.align = align
-          blocks[index] = block
-          commitBlocks(blocks, position ? { index, start: position.offset, end: position.offset } : null)
-        },
-        [commitBlocks, currentPosition],
-      )
-
-      /** Insert a page break after the active block. */
-      const insertPageBreak = useCallback(() => {
-        const current = docRef.current
-        if (!current) return
-        const index = activeIndexRef.current === null ? current.blocks.length - 1 : activeIndexRef.current
-        const blocks = current.blocks.slice()
-        blocks.splice(index + 1, 0, { ...PAGE_BREAK_BLOCK, runs: [{ text: '', marks: [] }] })
-        blocks.splice(index + 2, 0, { type: 'paragraph', runs: [{ text: '', marks: [] }] })
-        commitBlocks(blocks, { index: index + 2, start: 0, end: 0 })
-      }, [commitBlocks])
-
-      /** Insert a literal string at the caret (Tab), then re-read the fragment. */
-      const insertTextAtCaret = useCallback((text) => {
-        try {
-          const selection = window.getSelection ? window.getSelection() : null
-          if (!selection || selection.rangeCount === 0) return
-          const range = selection.getRangeAt(0)
-          range.deleteContents()
-          const node = document.createTextNode(text)
-          range.insertNode(node)
-          range.setStartAfter(node)
-          range.collapse(true)
-          selection.removeAllRanges()
-          selection.addRange(range)
-          const parent = node.parentNode
-          const fragment = parent && typeof parent.closest === 'function' ? parent.closest('[data-block]') : null
-          if (fragment && typeof fragment.dispatchEvent === 'function') {
-            fragment.dispatchEvent(new Event('input', { bubbles: true }))
-          }
-        } catch (err) {
-          /* a Tab that did nothing is better than a Tab that threw */
-        }
-      }, [])
-
-      /** Is the caret on the LAST visual line of this fragment (so Down leaves it)? */
-      const caretOnEdgeLine = useCallback((element, edge) => {
-        try {
-          if (typeof window === 'undefined' || !window.getSelection || !window.getComputedStyle) return true
-          const selection = window.getSelection()
-          if (!selection || selection.rangeCount === 0) return true
-          const range = selection.getRangeAt(0)
-          const rect = range.getBoundingClientRect()
-          const box = element.getBoundingClientRect()
-          const style = window.getComputedStyle(element)
-          const line = parseFloat(style.lineHeight)
-          const fallback = (parseFloat(style.fontSize) || 16) * 1.45
-          const height = Number.isFinite(line) && line > 0 ? line : fallback
-          // A zero-height rect (a collapsed caret at the very end) still carries a
-          // top, which is the line it is on - and that is all this needs.
-          const top = rect.height > 0 ? rect.top : rect.top || box.top
-          if (edge === 'last') return top + height >= box.bottom - 1
-          return top <= box.top + 1
-        } catch (err) {
-          return true
-        }
-      }, [])
-
-      /** Move the caret to the neighbouring fragment - across a page if need be. */
-      const moveToNeighbour = useCallback(
-        (element, forward) => {
-          const fragments = allFragments()
-          const at = fragments.indexOf(element)
-          if (at === -1) return false
-          const next = fragments[forward ? at + 1 : at - 1]
-          if (!next) return false
-          const info = fragmentInfo(next)
-          if (!info) return false
-          const offset = forward ? info.from : info.from + info.length
-          placeCaret({ source: info.source, offset }, null)
-          return true
-        },
-        [allFragments, fragmentInfo, placeCaret],
-      )
-
-      /**
-       * The keyboard: Enter, Backspace, Tab, the mark shortcuts, Ctrl+A, and the
-       * two movements a browser stops at a paragraph boundary - Down off the last
-       * line and Right off the last character, which is where a word processor
-       * walks on to the next paragraph (or the next PAGE).
-       */
-      const onBlockKeyDown = useCallback(
-        (event) => {
-          const current = docRef.current
-          const element = event && event.currentTarget ? event.currentTarget : null
-          if (!current || !element) return
-          const info = fragmentInfo(element)
-          if (!info) return
-          const index = info.source
-          const key = String(event.key ?? '')
-          const accel = event.ctrlKey === true || event.metaKey === true
-          if (accel && (key === 'a' || key === 'A')) {
-            event.preventDefault()
-            selectAll()
-            return
-          }
-          if (accel && (key === 's' || key === 'S')) {
-            event.preventDefault()
-            void save({ note: 'saved' })
-            return
-          }
-          if (accel && (key === 'b' || key === 'B')) {
-            event.preventDefault()
-            toggleMark('b')
-            return
-          }
-          if (accel && (key === 'i' || key === 'I')) {
-            event.preventDefault()
-            toggleMark('i')
-            return
-          }
-          if (accel && (key === 'u' || key === 'U')) {
-            event.preventDefault()
-            toggleMark('u')
-            return
-          }
-          if (key === 'Tab') {
-            event.preventDefault()
-            insertTextAtCaret('\t')
-            return
-          }
-          // Movement ACROSS blocks and pages. The browser owns every movement
-          // inside one fragment; these are the four ends where it stops.
-          if (!accel && !event.shiftKey && (key === 'ArrowDown' || key === 'ArrowUp')) {
-            const offsets = caretOffsets(element)
-            if (offsets && offsets.start === offsets.end && caretOnEdgeLine(element, key === 'ArrowDown' ? 'last' : 'first')) {
-              const atEnd = key === 'ArrowDown' ? offsets.start >= runsLength(current.blocks[index] ? current.blocks[index].runs : []) : false
-              // Down from the last line goes to the next block (or page); Up from
-              // the first line goes back to the previous one.
-              if (key === 'ArrowUp' || atEnd || offsets.start > 0) {
-                if (moveToNeighbour(element, key === 'ArrowDown')) {
-                  event.preventDefault()
-                  return
-                }
-              }
-            }
-          }
-          if (!accel && !event.shiftKey && (key === 'ArrowRight' || key === 'ArrowLeft')) {
-            const offsets = caretOffsets(element)
-            const length = runsLength(current.blocks[index] ? current.blocks[index].runs : [])
-            if (offsets && offsets.start === offsets.end && ((key === 'ArrowRight' && offsets.end >= length) || (key === 'ArrowLeft' && offsets.start === 0))) {
-              if (moveToNeighbour(element, key === 'ArrowRight')) {
-                event.preventDefault()
-                return
-              }
-            }
-          }
-          if (key === 'Enter' && event.shiftKey !== true) {
-            event.preventDefault()
-            const offsets = caretOffsets(element)
-            if (!offsets) return
-            const at = info.from + offsets.start
-            const block = current.blocks[index]
-            // The split is of the BLOCK, at the caret's offset in the MODEL: a
-            // fragment boundary in the middle of a paragraph must not matter.
-            const [left, right] = splitRunsAt(block.runs, at)
-            const blocks = current.blocks.slice()
-            blocks[index] = { ...block, runs: left }
-            const fresh = { type: block.type === 'heading' || block.type === 'code' || block.type === 'quote' ? 'paragraph' : block.type, runs: right }
-            if (fresh.type === 'listItem') {
-              fresh.ordered = block.ordered === true
-              fresh.level = block.level ?? 0
-            }
-            blocks.splice(index + 1, 0, fresh)
-            commitBlocks(blocks, { index: index + 1, start: 0, end: 0 })
-            return
-          }
-          if (key === 'Backspace') {
-            const offsets = caretOffsets(element)
-            if (!offsets || offsets.start !== 0 || offsets.end !== 0 || info.from + offsets.start !== 0 || index === 0) return
-            const previous = current.blocks[index - 1]
-            if (!previous) return
-            event.preventDefault()
-            // A page break in front of this block is what Backspace at the top of
-            // a page removes - there is no text to merge with, and without this
-            // the only way to take a break out would be to delete the block.
-            if (previous.type === 'pageBreak') {
-              const blocks = current.blocks.slice()
-              blocks.splice(index - 1, 1)
-              commitBlocks(blocks, { index: index - 1, start: 0, end: 0 })
-              return
-            }
-            const block = current.blocks[index]
-            const joinAt = runsLength(previous.runs)
-            const blocks = current.blocks.slice()
-            blocks[index - 1] = { ...previous, runs: mergeRuns(previous.runs, block.runs) }
-            blocks.splice(index, 1)
-            commitBlocks(blocks, { index: index - 1, start: joinAt, end: joinAt })
-          }
-        },
-        [allFragments, caretOnEdgeLine, commitBlocks, fragmentInfo, insertTextAtCaret, moveToNeighbour, save, selectAll, toggleMark],
-      )
-
-      /**
-       * Paste, as BLOCKS.
-       *
-       * The default paste would drop the clipboard's own markup into one
-       * paragraph - nested divs, styles this model cannot hold, and no paragraph
-       * breaks. This reads the clipboard's text, cuts it into paragraphs, and
-       * inserts them as real blocks around the caret, so pasting a paragraph from
-       * Word lands as paragraphs (with the marks that survived the trip).
-       */
-      const onBlockPaste = useCallback(
-        (event) => {
-          const current = docRef.current
-          const element = event && event.currentTarget ? event.currentTarget : null
-          if (!current || !element) return
-          const clipboard = event.clipboardData
-          if (!clipboard || typeof clipboard.getData !== 'function') return
-          const text = clipboard.getData('text/plain') ?? ''
-          if (text.length === 0) return
-          event.preventDefault()
-          const info = fragmentInfo(element)
-          if (!info) return
-          const offsets = caretOffsets(element)
-          const local = offsets ? offsets.start : 0
-          const at = info.from + local
-          const block = current.blocks[info.source]
-          if (!block) return
-          const lines = text.replaceAll('\r\n', '\n').replaceAll('\r', '\n').split('\n')
-          const inserted = lines.map((line) => ({ type: 'paragraph', runs: runsFromPlainText(line) }))
-          const [left, right] = splitRunsAt(block.runs, at)
-          const blocks = current.blocks.slice()
-          blocks[info.source] = { ...block, runs: mergeRuns(left, inserted[0] ? inserted[0].runs : []) }
-          const rest = inserted.slice(1)
-          blocks.splice(info.source + 1, 0, ...rest)
-          blocks.splice(info.source + 1 + rest.length, 0, { ...block, runs: right })
-          const caretIndex = info.source + rest.length + 1
-          commitBlocks(blocks, { index: caretIndex, start: 0, end: 0 })
-          setStatus({ kind: 'info', text: 'Pasted ' + (rest.length + 1) + ' paragraph(s)' })
-        },
-        [commitBlocks, fragmentInfo],
-      )
-
-
-      /** The document's title, as it is typed. */
+      /** A title edit, as it is typed. */
       const setTitle = useCallback(
         (value) => {
-          const current = docRef.current
+          const current = liveRef.current ?? docRef.current
           if (!current) return
-          applyDoc({ ...current, title: value })
+          const next = { ...current, title: value }
+          liveRef.current = next
+          applyDoc(next)
           setDirty(true)
           dirtyRef.current = true
         },
@@ -2563,20 +2656,107 @@ window.__ModuleLoader__.load({
       /** One page-setup change (size, orientation or a margin). */
       const setPage = useCallback(
         (patch) => {
-          const current = docRef.current
+          const current = liveRef.current ?? docRef.current
           if (!current) return
           const page = { ...current.page, ...patch, margins: { ...current.page.margins, ...(patch.margins ?? {}) } }
-          applyDoc({ ...current, page })
+          const next = { ...current, page }
+          liveRef.current = next
+          applyDoc(next)
           setDirty(true)
           dirtyRef.current = true
-          setEpoch((value) => value + 1)
         },
         [applyDoc],
       )
 
-      // ---------------------------------------------------------------------
-      // Layout: measure each block at the page's content width, then break pages
-      // ---------------------------------------------------------------------
+      /**
+       * The document's own family and size - what every run inherits when it names
+       * none. One write, and the whole document changes, which is what "this
+       * document is set in Georgia" has to mean. The editor's column takes the same
+       * two values, so what is typed IS what the `.docx` will say.
+       */
+      const setDocumentTypography = useCallback(
+        (patch) => {
+          const current = liveRef.current ?? docRef.current
+          if (!current) return
+          const next = {
+            ...current,
+            font: patch.font !== undefined ? patch.font : current.font,
+            fontSize: patch.fontSize !== undefined ? patch.fontSize : current.fontSize,
+          }
+          liveRef.current = next
+          applyDoc(next)
+          setDirty(true)
+          dirtyRef.current = true
+        },
+        [applyDoc],
+      )
+
+      /** This document's headings, for the navigator. */
+      const headings = useMemo(() => {
+        if (!doc) return []
+        return doc.blocks
+          .map((block, index) => (block.type === 'heading' ? { index, level: block.level ?? 1, text: block.runs.map((run) => run.text).join('') || '(untitled heading)' } : null))
+          .filter(Boolean)
+      }, [doc])
+
+      /** Show one heading: hand the editor that block. */
+      const jumpTo = useCallback((index) => {
+        const editor = editorRef.current
+        if (!editor || !editor.blocks) return
+        try {
+          if (typeof editor.blocks.getBlockByIndex === 'function') {
+            const block = editor.blocks.getBlockByIndex(index)
+            const holder = block && typeof block.holder === 'function' ? block.holder : null
+            if (holder && typeof holder.scrollIntoView === 'function') holder.scrollIntoView({ block: 'center' })
+          }
+          if (editor.caret && typeof editor.caret.setToBlock === 'function') editor.caret.setToBlock(index, 'start')
+        } catch (err) {
+          /* a jump that cannot be made is simply not made */
+        }
+      }, [])
+      // The outline pane reaches the editor through FOCUS_LISTENERS, which is
+      // registered once - so it calls the LATEST jump through a ref instead of
+      // holding a stale one.
+      const jumpToRef = useRef(jumpTo)
+      jumpToRef.current = jumpTo
+
+      /**
+       * Insert a block of one type after the block the caret is in.
+       *
+       * Editor.js's own block menu does this (its "+" and "/"), and this is the same
+       * insertion reached from the Document menu - which is how a heading of a chosen
+       * level, a quote or a code block is reachable without knowing that a slash
+       * opens a menu. A failed insertion is said in the status bar, not swallowed.
+       *
+       * @param type - the Editor.js block type.
+       * @param data - the block's own data (`{ level }` for a header).
+       */
+      const insertBlock = useCallback(
+        (type, data = {}) => {
+          const editor = editorRef.current
+          if (!editor || !editor.blocks) {
+            setStatus({ kind: 'warn', text: 'The editor is not ready to insert a block yet.' })
+            return
+          }
+          const level = Number.isFinite(Number(data.level)) ? Math.max(1, Math.min(6, Math.round(Number(data.level)))) : 2
+          const payload = type === 'header' ? { text: '', level } : data
+          try {
+            const at = typeof editor.blocks.getCurrentBlockIndex === 'function' ? editor.blocks.getCurrentBlockIndex() : -1
+            editor.blocks.insert(type, payload, undefined, at + 1, true)
+            setStatus({ kind: 'info', text: 'Inserted a ' + describeBlock({ type: type === 'header' ? 'heading' : type, level }) + ' block.' })
+          } catch (err) {
+            setStatus({ kind: 'warn', text: 'Could not insert that block: ' + messageOf(err) })
+          }
+        },
+        [],
+      )
+
+      /**
+       * The document's own geometry: the page's CONTENT width in pixels and its
+       * typography. The paper is not drawn any more, but this measure is the one the
+       * `.docx` will use, so the editor's column is that wide and what is on screen
+       * is what gets printed.
+       */
       const geometry = useMemo(() => {
         const page = doc && doc.page ? doc.page : { size: 'a4', orientation: 'portrait', margins: { top: 25.4, right: 25.4, bottom: 25.4, left: 25.4 } }
         const SIZES = { a4: { width: 210, height: 297 }, letter: { width: 215.9, height: 279.4 } }
@@ -2590,203 +2770,47 @@ window.__ModuleLoader__.load({
           heightMm,
           margins,
           contentWidthMm: Math.max(10, widthMm - margins.left - margins.right),
-          footerMm: 10,
         }
       }, [doc])
 
-      /**
-       * Put a block into the measuring box at the page's own width and
-       * typography, and hand back the element to measure.
-       *
-       * Every measurement this tab takes goes through here, which is what keeps
-       * the height of a block, the height of its lines and what the page actually
-       * paints from disagreeing: one box, one font, one width.
-       */
-      const prepareMeasure = useCallback(
-        (block) => {
-          const box = measureRef.current
-          if (!box || !box.firstChild) return null
-          try {
-            const target = box.firstChild
-            const attributes = blockAttributes(block, {})
-            target.className = attributes.className
-            for (const key of ['data-type', 'data-level', 'data-ordered', 'data-align']) {
-              if (attributes[key] === undefined) target.removeAttribute(key)
-              else target.setAttribute(key, attributes[key])
-            }
-            target.innerHTML = blockHtmlString(block)
-            box.style.width = geometry.contentWidthMm * PX_PER_MM + 'px'
-            const current = docRef.current
-            box.style.fontFamily = current && current.font ? "'" + String(current.font).replaceAll("'", '') + "'" : ''
-            box.style.fontSize = (current && Number.isFinite(current.fontSize) ? current.fontSize : 12) + 'pt'
-            return target
-          } catch (err) {
-            return null
-          }
-        },
-        [geometry],
-      )
+      /** The editor column's own style: the page's width, the document's type. */
+      const columnStyle = useMemo(() => {
+        const width = Math.round(geometry.contentWidthMm * (96 / 25.4))
+        const style = { maxWidth: Math.round(width * zoom) + 'px' }
+        if (doc && typeof doc.font === 'string' && doc.font.length > 0) style.fontFamily = styleFamily(doc.font)
+        // A size is always written: it is what everything on screen inherits, and
+        // leaving it off would make the document's own size invisible.
+        style.fontSize = (doc && Number.isFinite(doc.fontSize) ? doc.fontSize : 12) + 'pt'
+        return style
+      }, [doc, geometry.contentWidthMm, zoom])
+
+      /** The block type of the block the caret is in, for the status bar. */
+      const activeBlock = useMemo(() => {
+        if (!doc || activeIndex === null) return null
+        return doc.blocks[activeIndex] ?? null
+      }, [doc, activeIndex])
 
       /**
-       * The height of each RENDERED LINE of one block, in millimetres, with the
-       * character offset at the end of each line.
-       *
-       * This is what makes a paragraph continue on the next page instead of
-       * overflowing the one it is on, and it can only be taken in a browser: the
-       * text is laid out for real and each character is asked which line it is on.
-       * The scan therefore has a ceiling of {@link MAX_LINE_SCAN} characters - a
-       * paragraph longer than that keeps the lines it measured and its remainder
-       * becomes one estimated line, so the cost of a keystroke cannot grow with
-       * the length of a document's worst paragraph.
-       *
-       * @param block - the block to measure.
-       * @returns `{ heights, ends }` in millimetres and character offsets, or null.
+       * What the editor could not carry, as ONE list for the tab's one banner: what
+       * the `.docx` importer already said (tables, images, footnotes) and what a save
+       * through Editor.js reports (a page break, a run's own font or size). Counted by
+       * kind, so the banner names a kind once with its total.
        */
-      const measureLinesFor = useCallback(
-        (block) => {
-          const target = prepareMeasure(block)
-          if (!target || typeof document.createRange !== 'function' || typeof document.createTreeWalker !== 'function') return null
-          try {
-            const total = blockLength(block.runs)
-            const heights = []
-            const ends = []
-            let lineTop = null
-            let lineHeight = 0
-            let offset = 0
-            const pushLine = (end, height) => {
-              heights.push(height)
-              ends.push(end)
-            }
-            const walker = document.createTreeWalker(target, 0x4 /* NodeFilter.SHOW_TEXT */)
-            let node = walker.nextNode()
-            while (node && offset < MAX_LINE_SCAN) {
-              const text = node.nodeValue ?? ''
-              for (let at = 0; at < text.length && offset < MAX_LINE_SCAN; at += 1) {
-                const range = document.createRange()
-                range.setStart(node, at)
-                range.setEnd(node, at + 1)
-                const rect = range.getBoundingClientRect()
-                const charTop = rect.top
-                const charHeight = rect.height || 0
-                if (lineTop === null) {
-                  lineTop = charTop
-                } else if (Math.abs(charTop - lineTop) > 1) {
-                  // A new line: the previous one's height is the distance between
-                  // their tops, which is the line ADVANCE and not the glyph box.
-                  pushLine(offset, Math.max(0.5, charTop - lineTop))
-                  lineTop = charTop
-                  lineHeight = 0
-                }
-                lineHeight = Math.max(lineHeight, charHeight)
-                offset += 1
-              }
-              node = walker.nextNode()
-            }
-            // A soft break is a line of its own, and the walk above cannot see it
-            // (a `<br>` holds no text): count the breaks before the scan stopped as
-            // boundaries by looking at the block's own text.
-            const text = block.runs.map((run) => run.text).join('')
-            const scanned = Math.min(offset, MAX_LINE_SCAN)
-            const lineCount = Math.max(1, heights.length + 1)
-            const boxHeight = (target.getBoundingClientRect().height || 0) * MM_PER_PX
-            if (scanned >= total) {
-              // The whole block was walked: the last line ends at the block's end.
-              const lastHeight = Math.max(0.5, boxHeight - heights.reduce((sum, value) => sum + value, 0))
-              pushLine(total, lastHeight)
-            } else {
-              // Too long to walk: the remainder becomes ONE estimated line whose
-              // height is the average of the lines measured, scaled by how much
-              // text is left. The page break is then approximate - and the text is
-              // never lost, which is the part that matters.
-              const rest = total - scanned
-              const average = heights.length > 0 ? heights.reduce((sum, value) => sum + value, 0) / heights.length : Math.max(0.5, boxHeight / lineCount)
-              const linesLeft = Math.max(1, Math.ceil(rest / Math.max(1, scanned / lineCount)))
-              pushLine(total, average * linesLeft)
-              if (text.length === 0) return null
-            }
-            if (heights.length === 0 || heights.some((value) => !Number.isFinite(value) || value <= 0)) return null
-            return { heights, ends }
-          } catch (err) {
-            return null
-          }
-        },
-        [prepareMeasure],
-      )
-
-      const pageInfo = useMemo(() => {
-        const paginator = paginatorRef.current ?? { paginate: fallbackPaginate }
-        const blocks = doc ? doc.blocks : []
-        const current = docRef.current
-        const cacheKeyBase =
-          geometry.contentWidthMm + '|' + (current && current.font ? current.font : '') + '|' + (current && Number.isFinite(current.fontSize) ? current.fontSize : 12)
-        const cache = lineCacheRef.current
-        if (cache.size > 0 && cache.get('__base') !== cacheKeyBase) cache.clear()
-        cache.set('__base', cacheKeyBase)
-        const signatureOf = (block) => {
-          const text = (block.runs ?? []).map((run) => run.text).join('')
-          return block.type + '|' + (block.level ?? '') + '|' + (block.align ?? '') + '|' + text.length + '|' + text.slice(0, 24) + '|' + text.slice(-24)
+      const lossEntries = useMemo(() => {
+        const current = liveRef.current ?? doc
+        const byKind = new Map()
+        for (const entry of [...loss, ...(current && Array.isArray(current.editorLosses) ? current.editorLosses : [])]) {
+          if (!entry || typeof entry.kind !== 'string') continue
+          const existing = byKind.get(entry.kind)
+          if (existing) existing.count += Number.isFinite(entry.count) ? entry.count : 1
+          else byKind.set(entry.kind, { kind: entry.kind, count: Number.isFinite(entry.count) ? entry.count : 1, note: entry.note })
         }
-        const measure = (block) => {
-          const target = prepareMeasure(block)
-          if (!target) return 0
-          try {
-            const rect = typeof target.getBoundingClientRect === 'function' ? target.getBoundingClientRect() : null
-            const height = rect && rect.height ? rect.height : target.offsetHeight || 0
-            return (Number(height) || 0) * MM_PER_PX
-          } catch (err) {
-            return 0
-          }
-        }
-        // Only the block that does not fit is asked for its lines, and only once
-        // per (block content, width, font): typing in one paragraph re-measures
-        // that paragraph, never the document.
-        const measureLines = (block, index) => {
-          const key = index + '|' + signatureOf(block)
-          const cached = cache.get(key)
-          if (cached !== undefined) return cached
-          const fresh = measureLinesFor(block)
-          cache.set(key, fresh)
-          return fresh
-        }
-        return paginator.paginate({ blocks, page: doc ? doc.page : null, measure, measureLines, footerMm: geometry.footerMm })
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [doc, epoch, geometry, paginatorReady, prepareMeasure, measureLinesFor])
-
-      /**
-       * Type on a page that has no block of its own yet.
-       *
-       * A page break at the end of a document leaves an empty page behind it, and
-       * an empty page has nothing to put a caret in - so the page itself is the
-       * click target and appends the paragraph (which is where the caret would
-       * have gone anyway).
-       */
-      const appendParagraph = useCallback(() => {
-        const current = docRef.current
-        if (!current) return
-        const blocks = current.blocks.slice()
-        blocks.push({ type: 'paragraph', runs: [{ text: '', marks: [] }] })
-        commitBlocks(blocks, { index: blocks.length - 1, start: 0, end: 0 })
-      }, [commitBlocks])
-
-      /** The handlers `pagesElement` calls: every DOM event becomes a model edit. */
-      const pageHandlers = {
-        onInput: onBlockInput,
-        onKeyDown: onBlockKeyDown,
-        onPaste: onBlockPaste,
-        onFocus: () => refreshToolbarState(),
-        onEmptyPage: appendParagraph,
-      }
-
-      /** Every document open/close/structural change invalidates the line cache. */
-      useEffect(() => {
-        lineCacheRef.current.clear()
-      }, [epoch, doc ? doc.id : null, geometry.contentWidthMm])
+        return [...byKind.values()]
+      }, [doc, loss])
 
       // ---------------------------------------------------------------------
       // Render
       // ---------------------------------------------------------------------
-      const pages = pageInfo.pages ?? [{ index: 0, blocks: [] }]
-
       const railItems = summaries.map((item) =>
         h(
           'button',
@@ -2809,60 +2833,22 @@ window.__ModuleLoader__.load({
       const bar = h(
         'div',
         { className: 'dsw-bar', 'data-writing-bar': true },
-        // NEW IS THE LEFTMOST CONTROL, where a document tab is expected to keep
-        // it: the first thing on the bar, left of the title and every formatting
-        // control (it began life in the middle of the bar, which is where nobody
-        // looks for it).
+        // NEW IS THE LEFTMOST CONTROL, where a document tab is expected to keep it:
+        // the first thing on the bar, left of the title and every other control. It
+        // is ONE button, not a menu: a document is what this tab makes and a `.docx`
+        // is what the editor writes, so the only choice left to make is the name -
+        // and that is the dialog's business.
         h(
-          'details',
-          { className: 'dsw-menu', 'data-writing-new': true },
-          h('summary', null, 'New'),
-          h(
-            'div',
-            { className: 'dsw-menuPanel', 'data-side': 'left' },
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsw-menuItem',
-                'data-new': 'docx',
-                disabled: !session,
-                onClick: (event) => {
-                  closeMenus(event.currentTarget)
-                  askForFile('docx')
-                },
-              },
-              'Word document (.docx) \u2014 a real file in the conversation folder',
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsw-menuItem',
-                'data-new': 'xlsx',
-                disabled: !session,
-                onClick: (event) => {
-                  closeMenus(event.currentTarget)
-                  askForFile('xlsx')
-                },
-              },
-              'Spreadsheet (.xlsx) \u2014 a real file in the conversation folder',
-            ),
-            h(
-              'button',
-              {
-                type: 'button',
-                className: 'dsw-menuItem',
-                'data-new': 'page',
-                disabled: !session,
-                onClick: (event) => {
-                  closeMenus(event.currentTarget)
-                  void create('Untitled')
-                },
-              },
-              'Page kept in this conversation',
-            ),
-          ),
+          ToolButton,
+          {
+            title: 'New document \u2014 writes a real .docx on the Desktop',
+            action: 'new',
+            'data-writing-new': true,
+            emphasis: 'primary',
+            disabled: !session,
+            onClick: newDocument,
+          },
+          'New',
         ),
         h(
           ToolButton,
@@ -2892,9 +2878,9 @@ window.__ModuleLoader__.load({
           list: 'dsw-fontFamilies',
           placeholder: 'Font',
           title: fontsNote || 'The fonts installed on this machine',
-          value: activeProperties.font || '',
+          value: doc ? doc.font ?? '' : '',
           disabled: !doc,
-          onChange: (event) => applyAttribute('font', event.target.value),
+          onChange: (event) => setDocumentTypography({ font: event.target.value }),
         }),
         h(
           'datalist',
@@ -2908,76 +2894,12 @@ window.__ModuleLoader__.load({
           min: '4',
           max: '400',
           step: '0.5',
-          title: 'Size in points (applies to the selection, or to the whole block)',
-          value: activeProperties.size === null ? '' : String(activeProperties.size),
-          placeholder: String(doc ? doc.fontSize : 12),
+          title: 'The document\u2019s size in points \u2014 what every run inherits',
+          value: doc ? doc.fontSize : '',
+          placeholder: '12',
           disabled: !doc,
-          onChange: (event) => applyAttribute('size', Number(event.target.value)),
+          onChange: (event) => setDocumentTypography({ fontSize: Number(event.target.value) }),
         }),
-        h('span', { className: 'dsw-sep' }),
-        h(
-          'div',
-          { className: 'dsw-group', 'data-writing-marks': true },
-          MARK_BUTTONS.map(([mark, glyph, title]) =>
-            h(
-              ToolButton,
-              {
-                key: 'mark-' + mark,
-                title: title,
-                action: 'mark-' + mark,
-                active: activeMarks.includes(mark),
-                disabled: !doc,
-                className: mark === 'b' ? 'dsw-bold' : mark === 'i' ? 'dsw-italic' : mark === 'u' ? 'dsw-under' : mark === 's' ? 'dsw-strike' : 'dsw-mono',
-                onMouseDown: (event) => event.preventDefault(),
-                onClick: () => toggleMark(mark),
-              },
-              glyph,
-            ),
-          ),
-        ),
-        h('select', {
-          className: 'dsw-select',
-          'data-writing-blocktype': true,
-          title: doc && activeIndex !== null && doc.blocks[activeIndex] ? 'Block type: ' + describeBlock(doc.blocks[activeIndex]) : 'Block type',
-          value: doc && activeIndex !== null && doc.blocks[activeIndex] ? doc.blocks[activeIndex].type + ':' + (doc.blocks[activeIndex].level ?? '') : 'paragraph:',
-          disabled: !doc || activeIndex === null,
-          onChange: (event) => {
-            const [type, level] = String(event.target.value).split(':')
-            retype(type, level === '' ? null : Number(level), null)
-          },
-        }, BLOCK_CHOICES.map(([type, level, label]) => h('option', { key: type + level, value: type + ':' + (level ?? '') }, label))),
-        h(
-          'div',
-          { className: 'dsw-group', 'data-writing-lists': true },
-          h(ToolButton, { title: 'Bulleted list', action: 'list-bullet', disabled: !doc, onMouseDown: (e) => e.preventDefault(), onClick: () => retype('listItem', 0, false) }, '\u2022'),
-          h(ToolButton, { title: 'Numbered list', action: 'list-number', disabled: !doc, onMouseDown: (e) => e.preventDefault(), onClick: () => retype('listItem', 0, true) }, '1.'),
-          h(ToolButton, { title: 'Remove the list', action: 'list-none', disabled: !doc, onMouseDown: (e) => e.preventDefault(), onClick: () => retype('paragraph', null, null) }, '\u21a9'),
-        ),
-        h(
-          'div',
-          { className: 'dsw-group', 'data-writing-align': true },
-          [
-            ['left', 'Align left'],
-            ['center', 'Align centre'],
-            ['right', 'Align right'],
-            ['justify', 'Justify'],
-          ].map(([mode, title]) =>
-            h(
-              ToolButton,
-              {
-                key: 'align-' + mode,
-                title,
-                action: 'align-' + mode,
-                active: Boolean(doc && activeIndex !== null && doc.blocks[activeIndex] && doc.blocks[activeIndex].align === mode),
-                disabled: !doc,
-                onMouseDown: (event) => event.preventDefault(),
-                onClick: () => setAlign(mode),
-              },
-              h(AlignGlyph, { mode }),
-            ),
-          ),
-        ),
-        h(ToolButton, { title: 'Insert a page break', action: 'page-break', disabled: !doc, onMouseDown: (e) => e.preventDefault(), onClick: insertPageBreak }, '\u21b5\u2502'),
         h(
           ToolButton,
           {
@@ -2992,43 +2914,76 @@ window.__ModuleLoader__.load({
         h(
           'details',
           { className: 'dsw-menu', 'data-writing-pagemenu': true },
-          h('summary', null, 'Page'),
+          h('summary', null, 'Document'),
           h(
             'div',
             { className: 'dsw-menuPanel', 'data-side': 'left' },
-            h(
-              'div',
-              { className: 'dsw-menuRow' },
-              h('span', null, 'Size'),
+            // The block types Editor.js does not reach from its own toolbar live
+            // here. Its block menu inserts them by typing "/", and a control that
+            // names the type outright is the one a person hunting for "Heading 1"
+            // actually reaches for. EVERY heading level is offered, not just one:
+            // a document whose first heading is a level 2 is a document nobody can
+            // write a title for.
+            h('div', { className: 'dsw-menuRow' }, h('span', null, 'Insert')),
+            [1, 2, 3, 4, 5, 6].map((level) =>
               h(
-                'select',
+                'button',
                 {
-                  className: 'dsw-select',
-                  'data-writing-pagesize': true,
-                  value: doc ? doc.page.size : 'a4',
+                  key: 'insert-heading-' + level,
+                  type: 'button',
+                  className: 'dsw-menuItem',
+                  'data-writing-insert': 'heading-' + level,
                   disabled: !doc,
-                  onChange: (event) => setPage({ size: event.target.value }),
+                  onClick: (event) => {
+                    closeMenus(event.currentTarget)
+                    insertBlock('header', { level })
+                  },
                 },
-                h('option', { value: 'a4' }, 'A4 (210 \u00d7 297 mm)'),
-                h('option', { value: 'letter' }, 'Letter (8.5 \u00d7 11 in)'),
+                'Heading ' + level,
               ),
             ),
-            h(
-              'div',
-              { className: 'dsw-menuRow' },
-              h('span', null, 'Orientation'),
+            ['quote', 'code'].map((what) =>
               h(
-                'select',
+                'button',
                 {
-                  className: 'dsw-select',
-                  'data-writing-orientation': true,
-                  value: doc ? doc.page.orientation : 'portrait',
+                  key: 'insert-' + what,
+                  type: 'button',
+                  className: 'dsw-menuItem',
+                  'data-writing-insert': what,
                   disabled: !doc,
-                  onChange: (event) => setPage({ orientation: event.target.value }),
+                  onClick: (event) => {
+                    closeMenus(event.currentTarget)
+                    insertBlock(what)
+                  },
                 },
-                h('option', { value: 'portrait' }, 'Portrait'),
-                h('option', { value: 'landscape' }, 'Landscape'),
+                what === 'quote' ? 'Quote' : 'Code block',
               ),
+            ),
+            h('div', { className: 'dsw-menuRow' }, h('span', null, 'Page size')),
+            h(
+              'select',
+              {
+                className: 'dsw-select',
+                'data-writing-pagesize': true,
+                value: doc ? doc.page.size : 'a4',
+                disabled: !doc,
+                onChange: (event) => setPage({ size: event.target.value }),
+              },
+              h('option', { value: 'a4' }, 'A4 (210 \u00d7 297 mm)'),
+              h('option', { value: 'letter' }, 'Letter (8.5 \u00d7 11 in)'),
+            ),
+            h('div', { className: 'dsw-menuRow' }, h('span', null, 'Orientation')),
+            h(
+              'select',
+              {
+                className: 'dsw-select',
+                'data-writing-orientation': true,
+                value: doc ? doc.page.orientation : 'portrait',
+                disabled: !doc,
+                onChange: (event) => setPage({ orientation: event.target.value }),
+              },
+              h('option', { value: 'portrait' }, 'Portrait'),
+              h('option', { value: 'landscape' }, 'Landscape'),
             ),
             ['top', 'right', 'bottom', 'left'].map((side) =>
               h(
@@ -3048,10 +3003,10 @@ window.__ModuleLoader__.load({
                 }),
               ),
             ),
-            // The document's OWN typography: what every run inherits when it
-            // names no font of its own. Changing it here is one write, not one
-            // per run - which is the difference between "this document is set in
-            // Georgia" and "these four hundred runs are".
+            // The document's OWN typography: what every run inherits when it names
+            // no font of its own. Changing it here is one write, not one per run -
+            // which is the difference between "this document is set in Georgia" and
+            // "these four hundred runs are".
             h(
               'div',
               { className: 'dsw-menuRow' },
@@ -3092,6 +3047,7 @@ window.__ModuleLoader__.load({
             {
               className: 'dsw-select',
               'data-writing-zoom': true,
+              title: 'How wide the editor column is drawn',
               value: String(zoom),
               onChange: (event) => setZoom(Number(event.target.value)),
             },
@@ -3131,8 +3087,25 @@ window.__ModuleLoader__.load({
                 ),
               ]
             : null,
+          // THE × IS THE DOCUMENT'S OWN REMOVE. Deleting the document you are writing
+          // on is an action you take while looking at it, not one you go looking for
+          // in the rail - and the rail's own Delete is still there for the others.
+          h(
+            ToolButton,
+            {
+              title: doc ? 'Delete "' + (doc.title || 'Untitled') + '"' : 'Delete this document',
+              action: 'delete-document',
+              'data-writing-delete': true,
+              disabled: !doc || !session,
+              onClick: () => {
+                const current = docRef.current
+                if (current) void remove(current.id)
+              },
+            },
+            '\u00d7',
+          ),
           h(ToolButton, { title: 'Save (Ctrl+S)', action: 'save', emphasis: 'primary', disabled: !doc, onClick: () => save({ note: 'saved' }) }, 'Save'),
-          h(ToolButton, { title: 'Export as .docx and render it with LibreOffice', action: 'proof', disabled: !doc, onClick: () => exportDocument('docx', { proof: true }) }, 'Proof'),
+          h(ToolButton, { title: 'Export as .docx to the Desktop and render it with LibreOffice', action: 'proof', disabled: !doc, onClick: () => exportDocument('docx', { proof: true }) }, 'Proof'),
           h(
             'details',
             { className: 'dsw-menu', 'data-writing-export': true },
@@ -3140,13 +3113,10 @@ window.__ModuleLoader__.load({
             h(
               'div',
               { className: 'dsw-menuPanel', 'data-side': 'right' },
-              h('button', { type: 'button', className: 'dsw-menuItem', 'data-export': 'docx', disabled: !doc, onClick: (event) => { closeMenus(event.currentTarget); void exportDocument('docx') } }, 'Word document (.docx) \u2014 into the conversation folder'),
-              h('button', { type: 'button', className: 'dsw-menuItem', 'data-export': 'docx-desktop', disabled: !doc, onClick: (event) => { closeMenus(event.currentTarget); void exportDocument('docx', { target: 'desktop' }) } }, 'Word document (.docx) \u2014 to the Desktop'),
-              h('button', { type: 'button', className: 'dsw-menuItem', 'data-export': 'md', disabled: !doc, onClick: (event) => { closeMenus(event.currentTarget); void exportDocument('md') } }, 'Markdown (.md)'),
-              h('button', { type: 'button', className: 'dsw-menuItem', 'data-export': 'txt', disabled: !doc, onClick: (event) => { closeMenus(event.currentTarget); void exportDocument('txt') } }, 'Plain text (.txt)'),
-              exported
-                ? h('div', { className: 'dsw-menuRow', 'data-writing-exported': true }, h('span', null, 'Last: ' + exported.name))
-                : null,
+              h('button', { type: 'button', className: 'dsw-menuItem', 'data-export': 'docx', disabled: !doc, onClick: (event) => { closeMenus(event.currentTarget); void exportDocument('docx') } }, 'Word document (.docx) \u2014 to the Desktop'),
+              h('button', { type: 'button', className: 'dsw-menuItem', 'data-export': 'md', disabled: !doc, onClick: (event) => { closeMenus(event.currentTarget); void exportDocument('md') } }, 'Markdown (.md) \u2014 to the Desktop'),
+              h('button', { type: 'button', className: 'dsw-menuItem', 'data-export': 'txt', disabled: !doc, onClick: (event) => { closeMenus(event.currentTarget); void exportDocument('txt') } }, 'Plain text (.txt) \u2014 to the Desktop'),
+              exported ? h('div', { className: 'dsw-menuRow', 'data-writing-exported': true }, h('span', null, 'Last: ' + exported.name)) : null,
             ),
           ),
         ),
@@ -3231,7 +3201,7 @@ window.__ModuleLoader__.load({
               'div',
               { className: 'dsw-outlineList' },
               headings.length === 0
-                ? h('div', { className: 'dsw-empty' }, 'No headings yet. Give a line the "Heading 1" block type and it appears here.')
+                ? h('div', { className: 'dsw-empty' }, 'No headings yet. Insert one from the Document menu and it appears here.')
                 : headings.map((heading) =>
                     h(
                       'button',
@@ -3252,6 +3222,24 @@ window.__ModuleLoader__.load({
           )
         : null
 
+      /**
+       * THE EDITOR COLUMN.
+       *
+       * The holder is React's to own (`ref`) and Editor.js's to fill: React never
+       * renders into it after the editor is mounted, which is exactly the bargain
+       * that keeps the caret where the person put it. The note under it is only
+       * shown when the editor is not ready, so a failure is a sentence rather than
+       * a blank column.
+       */
+      const editorNote =
+        editorState === 'error'
+          ? editorError || 'The editor could not start.'
+          : phase === 'loading' || editorState === 'loading' || editorState === 'rendering'
+            ? 'Opening\u2026'
+            : editorState === 'idle'
+              ? 'The document is open; the editor starts with it.'
+              : ''
+
       const body = h(
         'div',
         { className: 'dsw-body' },
@@ -3262,29 +3250,26 @@ window.__ModuleLoader__.load({
           doc
             ? h(
                 'div',
-                { className: 'dsw-pages', ref: pagesRef, 'data-writing-pages': String(pages.length), style: { zoom: String(zoom) } },
-                pagesElement({ doc, pages, geometry, handlers: pageHandlers }),
+                { className: 'dsw-editor', 'data-writing-editor': editorState, style: columnStyle },
+                h('div', { className: 'dsw-host', ref: hostRef, 'data-writing-editorjs': true }),
+                editorNote.length > 0 ? h('div', { className: 'dsw-editorNote', 'data-writing-editor-note': true }, editorNote) : null,
               )
             : h('div', { className: 'dsw-empty' }, phase === 'loading' ? 'Opening\u2026' : 'No document is open.'),
-          h(
-            'div',
-            { className: 'dsw-measure', ref: measureRef, 'aria-hidden': 'true' },
-            h('div', { className: 'dsw-block', 'data-type': 'paragraph' }),
-          ),
         ),
         outline,
       )
 
-      const lossBanner =        loss.length > 0
+      const lossBanner =
+        lossEntries.length > 0
           ? h(
               'div',
               { className: 'dsw-loss', 'data-writing-loss': true },
               h(
                 'span',
                 { className: 'dsw-lossText' },
-                'This document uses content this tab cannot represent, and saving it as .docx would drop it: ' +
-                  loss.map((entry) => entry.count + ' \u00d7 ' + entry.kind).join(', ') +
-                  '. Keep the original file, or edit these parts in LibreOffice.',
+                'This document uses content the editor cannot carry, and saving it would drop it: ' +
+                  lossEntries.map((entry) => entry.count + ' \u00d7 ' + entry.kind).join(', ') +
+                  '. The text is kept in the file; edit these parts in LibreOffice.',
               ),
               h(ToolButton, { title: 'Dismiss', action: 'loss-dismiss', onClick: () => setLoss([]) }, '\u2715'),
             )
@@ -3295,16 +3280,14 @@ window.__ModuleLoader__.load({
         { className: 'dsw-status', 'data-writing-status': status.kind, 'data-writing-version': PLUGIN_VERSION },
         h('span', { 'data-writing-words': true }, doc ? wordCountOf(doc) + ' words' : '0 words'),
         h('span', null, '\u00b7'),
-        h('span', { 'data-writing-pages': true }, pages.length + (pages.length === 1 ? ' page' : ' pages')),
-        h('span', null, '\u00b7'),
-        h('span', null, doc ? doc.blocks.length + ' blocks' : '0 blocks'),
-        pageInfo.overflow > 0 ? h('span', { 'data-writing-overflow': true }, '\u00b7 ' + pageInfo.overflow + ' block(s) taller than the page') : null,
+        h('span', { 'data-writing-blocks': true }, doc ? doc.blocks.length + ' blocks' : '0 blocks'),
+        activeBlock ? h('span', { 'data-writing-active': true }, '\u00b7 ' + describeBlock(activeBlock)) : null,
         h('span', { className: 'dsw-spacer' }),
         // A document linked to a file says which file: it is the thing the person
         // will open in Word or LibreOffice, and it is what Save writes.
         doc && doc.origin && doc.origin.path ? h('span', { 'data-writing-file': true, title: 'Linked to this file in the conversation folder' }, '\u25cf ' + doc.origin.path) : null,
-        // The document's own typography, so what the page is set in is visible
-        // without opening a menu; and how many families this machine offers.
+        // The document's own typography, so what it is set in is visible without
+        // opening a menu; and how many families this machine offers.
         doc ? h('span', { 'data-writing-font-note': true }, (doc.font ? doc.font + ' ' : '') + doc.fontSize + 'pt') : null,
         fonts.length > 0 ? h('span', { 'data-writing-fonts-note': true, title: fontsNote }, fonts.length + ' fonts') : null,
         status.text ? h('span', { 'data-writing-message': true }, status.text) : null,
@@ -4199,14 +4182,26 @@ window.__ModuleLoader__.load({
       PAGE_ADDRESS,
       OUTLINE_ADDRESS,
       PAGE_EXTENSIONS,
-      ROUTES: { STATE_ROUTE, DOCUMENT_ROUTE, DELETE_ROUTE, PUBLISH_ROUTE, IMPORT_ROUTE, EXPORT_ROUTE, CREATE_FILE_ROUTE, SAVE_FILE_ROUTE, OPEN_FILE_ROUTE, OUTLINE_ROUTE, FONTS_ROUTE, PAGE_ROUTE },
+      ROUTES: { STATE_ROUTE, DOCUMENT_ROUTE, DELETE_ROUTE, PUBLISH_ROUTE, IMPORT_ROUTE, EXPORT_ROUTE, CREATE_FILE_ROUTE, SAVE_FILE_ROUTE, OPEN_FILE_ROUTE, OUTLINE_ROUTE, FONTS_ROUTE },
+      EDITOR_ROUTE,
+      EDITOR_SCRIPTS,
+      EDITOR_KNOWN_TYPES,
+      EDITOR_INLINE_TOOLS,
+      MARK_ATTRIBUTE,
+      MAX_BLOCKS,
       MARK_BUTTONS,
       BLOCK_CHOICES,
-      PAGE_BREAK_BLOCK,
       fallbackPaginate,
       escapeHtml,
       pushRun,
       sameRun,
+      normalizeRuns,
+      markHtml,
+      runsFromHtmlString,
+      parseRunStyle,
+      styleFamily,
+      toEditorData,
+      fromEditorData,
       runsFromNodes,
       runsFromPlainText,
       runsLength,

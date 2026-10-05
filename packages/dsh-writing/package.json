@@ -1,17 +1,20 @@
 {
   "name": "dsh-writing",
-  "version": "0.1.0-alpha.3",
-  "description": "Writing: a page tab for the conversation's own documents - a paged WYSIWYG surface over a persistent store, with the .docx codec this package owns and the harness's own LibreOffice as the proof renderer. See packages/dsh-writing/README.md.",
+  "version": "0.1.0-alpha.5",
+  "description": "Writing: a document tab for the conversation's own documents - a vendored Editor.js surface over a persistent store, three `writing_*` tools so the agent writes the same documents the person edits, the research skill this pack ships, and the .docx codec this package owns with the harness's own LibreOffice as the proof renderer. See packages/dsh-writing/README.md.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./page": "./lib/page.js",
+    "./editorjs": "./lib/editorjs.js",
+    "./tools": "./lib/tools.js",
     "./package.json": "./package.json"
   },
   "files": [
     "lib",
+    "skills",
     "cordis.patch.yml"
   ],
   "dsh": {

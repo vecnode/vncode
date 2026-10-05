@@ -1486,8 +1486,8 @@ try {
 }
 
 // ------------------------------------------- every runtime skill registration
-// Three rows register a skill into the harness's own registry at activation
-// (dsh-media's two, dsh-diagrams' two, dsh-pdf's one), and every one of them
+// Four rows register a skill into the harness's own registry at activation
+// (dsh-media's two, dsh-diagrams' two, dsh-pdf's one, dsh-writing's one), and each of them
 // must name the FILE it read and its SOURCE BUCKET. The source is not cosmetic:
 // `ctx.skills.get()` - what the `skill` tool calls to LOAD a skill, as opposed to
 // listing it - validates the definition it gets back and requires a STRING
@@ -1495,11 +1495,12 @@ try {
 // the winning entry (`loaded skill "x" source must be a string`, measured against
 // the real registry). `path` is what makes the definition file-backed, which is
 // what lets a skills browser show and edit the document the model is given.
-// dsh-media's own registration is driven behaviourally in check-media-node; the
-// other two are pinned from their source here, because nothing else drives them.
+// dsh-media's own registration is driven behaviourally in check-media-node, and
+// dsh-writing's is driven in check-writing-node; the rest are pinned from their
+// source here, because nothing else drives them.
 {
   const registrations = []
-  for (const packageName of ['dsh-media', 'dsh-diagrams', 'dsh-pdf']) {
+  for (const packageName of ['dsh-media', 'dsh-diagrams', 'dsh-pdf', 'dsh-writing']) {
     registrations.push({
       packageName,
       source: await fsp.readFile(path.join(repo, 'packages', packageName, 'lib', 'index.js'), 'utf8'),
@@ -1509,7 +1510,7 @@ try {
   check(
     'every bundled-skill registration names its file and source bucket',
     named.map((entry) => entry.packageName).join(','),
-    'dsh-media,dsh-diagrams,dsh-pdf',
+    'dsh-media,dsh-diagrams,dsh-pdf,dsh-writing',
   )
 }
 

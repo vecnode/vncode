@@ -1,0 +1,16 @@
+{
+  "name": "dsh-writing-editorjs-vendor",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Build inputs for the vendored Editor.js surface shipped inside dsh-writing (lib/vendor/editorjs/). Rebuild: node build.mjs (see packages/dsh-writing/README.md). Never published, and never shipped: a distribution carries lib/vendor/, and this folder is not part of the package's `files` list - the same bargain the vendored Konva surface makes. There is deliberately no package-lock.json and no node_modules: build.mjs reads each artifact straight out of its pinned npm TARBALL, so vendoring needs no install step and no dependency tree.",
+  "type": "module",
+  "license": "MIT",
+  "pins": {
+    "editorjs": "2.31.7",
+    "paragraph": "2.11.7",
+    "header": "2.8.9",
+    "list": "2.0.9",
+    "quote": "2.7.6",
+    "code": "2.9.4"
+  }
+}

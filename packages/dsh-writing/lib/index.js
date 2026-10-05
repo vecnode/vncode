@@ -28,8 +28,18 @@
  * session persistence when it is cold - the same two-step lookup
  * `@deepseek-ai/dsh-api-workspace-files` uses (`lib/index.js` of `dsh-editor`
  * carries the same helper for the same reason). The client never names a root.
+ *
+ * AND THE MODEL CAN WRITE ONE. Three tools (`lib/tools.js`) drive the same store
+ * the tab reads - `writing_list`, `writing_read`, `writing_write` - so a document
+ * the agent composes is a document the person can edit, proof and export, not a
+ * Markdown file they have to import. This package also ships the pack's one
+ * METHOD skill (`skills/research/`): how a literature review is run, sourced and
+ * cited, because the artifact a review produces is the artifact this tab makes.
+ * Both are registered before the connection check below, so a profile whose
+ * connection is unavailable still gets them.
  */
 import { promises as fsp } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -46,10 +56,18 @@ import { docxFileName, readDocx, writeDocx } from './ooxml.js'
 import { createSheetDocument, readSheetFile, sheetText, writeSheetFile } from './sheet.js'
 import { listFonts } from './fonts.js'
 import { MAX_CONVERSATION_BYTES, MAX_DOCUMENTS, WritingStore, resolveHome } from './store.js'
+import { buildTools } from './tools.js'
 
 export const name = 'dsh-writing'
 
-export const inject = ['connection']
+/**
+ * `tools` is required and not merely wanted: registering the three writing tools
+ * is part of activating this row, and a profile without the registry should say so
+ * rather than silently half-activate. `connection` carries the browser routes and
+ * is checked defensively below (a profile can load this row without a web carrier,
+ * and then the tab is simply absent while the tools still work).
+ */
+export const inject = ['connection', 'tools']
 
 /** Keep in sync with the client's hard-coded route constants. */
 const API_ROOT = '/api/dsh-writing'
@@ -72,8 +90,23 @@ const FONTS_ROUTE = API_ROOT + '/fonts'
  * over this route and imported from a blob URL by the tab (the shape `dsh-canvas`
  * uses for its engine). One implementation, driven by the checks on the host and
  * by the tab in the page.
+ *
+ * The TAB no longer imports it - the editor is the vendored Editor.js surface now,
+ * and a block list has no page in it - but the route stays: the splitter is a public
+ * part of this package, `check-writing-node.mjs` drives it, and a page view that
+ * comes back would need no host change at all.
  */
 const PAGE_ROUTE = API_ROOT + '/page.js'
+/**
+ * The vendored Editor.js surface, served to the BROWSER - one exact route per file
+ * (`/vendor/editorjs/editorjs.umd.js`, `…/header.umd.js`, …), because they are
+ * classic scripts a `<script>` element loads and each one leaves a global behind.
+ *
+ * The bytes come from `lib/vendor/editorjs/`, which is built and hashed by
+ * `packages/dsh-writing/vendor/editorjs/build.mjs`; the ETag is the sha256 recorded
+ * there, so a changed artifact is a changed URL and an unchanged one costs a 304.
+ */
+const EDITOR_ROUTE = API_ROOT + '/vendor/editorjs/'
 
 /** Text imports above this many bytes are refused instead of buffered. */
 const MAX_IMPORT_BYTES = 8 * 1024 * 1024
@@ -81,6 +114,17 @@ const MAX_IMPORT_BYTES = 8 * 1024 * 1024
 const MAX_EXPORT_ATTEMPTS = 50
 /** The library's own store key (its file is fixed, so the key only labels it). */
 const LIBRARY_KEY = 'library'
+/**
+ * The skills this bundle ships, by the id each one is addressed by.
+ *
+ * The `research` skill is the pack's ONE method skill: every other skill teaches a
+ * tool (`canvas-design` teaches `canvas_*`, `pdf-analysis` teaches `pdf_*`), and
+ * this one teaches a practice - how a literature review is scoped, searched,
+ * verified, synthesized and cited. It ships with THIS package because the artifact
+ * a review produces is the artifact this tab makes, and because the review's last
+ * step is a `writing_write` call.
+ */
+const SKILL_FILES = [{ name: 'research', file: '../skills/research/SKILL.md' }]
 
 /** Respond with a JSON body and a status code. */
 function json(status, body) {
@@ -139,8 +183,7 @@ async function sessionRoot(ctx, sessionId) {
 }
 
 /** Resolve a workspace-relative path and verify by realpath that it stays inside. */
-async function resolveInside(cwd, rel) {
-  if (typeof cwd !== 'string' || cwd.length === 0) throw httpError(400, 'BAD_REQUEST', 'A workspace folder is required.')
+async function resolveInside(cwd, rel) {  if (typeof cwd !== 'string' || cwd.length === 0) throw httpError(400, 'BAD_REQUEST', 'A workspace folder is required.')
   if (typeof rel !== 'string' || rel.length === 0) throw httpError(400, 'BAD_REQUEST', 'A path is required.')
   const normalized = rel.replaceAll('\\', '/')
   if (normalized.startsWith('/') || /^[A-Za-z]:/.test(normalized)) {
@@ -165,6 +208,42 @@ async function resolveInside(cwd, rel) {
     throw httpError(500, 'IO_ERROR', 'Could not resolve the file on disk.', err)
   }
   return fileReal
+}
+
+/**
+ * The absolute path one `origin` names: a workspace-relative file, or a file this
+ * package itself created on the Desktop.
+ *
+ * The two are different because their CONTAINMENT is different, and the check is
+ * what makes "write back to the file this document came from" safe: a relative
+ * origin is resolved INSIDE the workspace (the rule `resolveInside` states), and an
+ * absolute one is only accepted when its OWN FOLDER is the Desktop this host would
+ * export to. Nothing else outside the workspace is reachable, and a document that
+ * names some other absolute path is a typed refusal rather than a write.
+ *
+ * @param ctx - cordis context.
+ * @param sessionId - the session the tab belongs to.
+ * @param origin - the stored `origin.path`.
+ * @returns the absolute path.
+ */
+async function originFile(ctx, sessionId, origin) {
+  const value = typeof origin === 'string' ? origin : ''
+  if (value.length === 0) return null
+  const normalized = value.replaceAll('\\', '/')
+  if (!normalized.startsWith('/') && !/^[A-Za-z]:/.test(normalized)) {
+    return await resolveInside(await sessionRoot(ctx, sessionId), value)
+  }
+  const desktop = await desktopDir()
+  const target = path.resolve(value)
+  if (path.dirname(target) !== path.resolve(desktop)) {
+    throw httpError(403, 'OUTSIDE_WORKSPACE', 'This document is linked to a file outside the conversation folder and the Desktop.')
+  }
+  try {
+    return await fsp.realpath(target)
+  } catch (err) {
+    if (err && err.code === 'ENOENT') return target
+    throw httpError(500, 'IO_ERROR', 'Could not resolve the file on disk.', err)
+  }
 }
 
 /**
@@ -519,22 +598,32 @@ async function handleExport(ctx, request) {
             : writeDocx(entry, { title: entry.title })
     const fallback = format === 'docx' ? docxFileName(entry.title).replace(/\.docx$/, '') : entry.title
     const name = safeName(typeof payload.name === 'string' && payload.name.length > 0 ? payload.name : fallback, 'document', extension)
-    let dir
-    let relative = false
-    if (payload.target === 'desktop') {
-      dir = await desktopDir()
-    } else {
-      const cwd = await sessionRoot(ctx, sessionId)
-      dir = await fsp.realpath(path.resolve(cwd))
-      relative = true
-    }
+    const toDesktop = payload.target === 'desktop'
+    const dir = toDesktop ? await desktopDir() : await fsp.realpath(path.resolve(await sessionRoot(ctx, sessionId)))
     const written = await writeFresh(dir, name, data)
     const base = path.basename(written)
+    // PROOF NEEDS A PATH THE PREVIEW CAN READ. Core's document preview is handed a
+    // WORKSPACE address (`dsh-resource://file/session/…`), so a `.docx` that was
+    // exported to the Desktop cannot be previewed where it landed. When the caller
+    // asks for a proof, the same bytes are ALSO written into the conversation folder
+    // (over the same name, so a second proof does not litter `-2`, `-3` copies) and
+    // THAT is the address handed back for rendering. The workspace copy is the
+    // disposable one: LibreOffice is what shows the person what the file made.
+    let previewPath = toDesktop ? null : base
+    if (toDesktop && payload.proof === true && format === 'docx') {
+      const cwd = await fsp.realpath(path.resolve(await sessionRoot(ctx, sessionId)))
+      const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '')
+      const proofName = safeName(base.replace(/\.docx$/i, '') + '-proof-' + stamp, 'proof', '.docx')
+      const proofFile = path.join(cwd, proofName)
+      await fsp.writeFile(proofFile, data)
+      previewPath = proofName
+    }
     return json(200, {
       ok: true,
       format,
       name: base,
-      path: relative ? base : written,
+      path: previewPath ?? written,
+      previewPath,
       absolute: written,
       dir,
       bytes: data.byteLength,
@@ -571,13 +660,18 @@ async function handleCreateFile(ctx, request) {
           : format === 'txt'
             ? Buffer.from('', 'utf8')
             : writeDocx({ title, blocks: [{ type: 'paragraph', runs: [{ text: '', marks: [] }] }] }, { title })
-    const cwd = await sessionRoot(ctx, sessionId)
-    const dir = await fsp.realpath(path.resolve(cwd))
+    const cwd = await fsp.realpath(path.resolve(await sessionRoot(ctx, sessionId)))
+    // A DOCUMENT is written where the person will look for it - the Desktop - and
+    // the store keeps the document linked to THAT file, so every later Save writes
+    // the file they can open in Word. A workbook is the exception on purpose: its
+    // grid lives in the right bar and reads the file through a workspace address.
+    const onDesktop = payload.target === 'desktop' && format !== 'xlsx'
+    const dir = onDesktop ? await desktopDir() : cwd
     const name = safeName(typeof payload.name === 'string' && payload.name.length > 0 ? payload.name : title, 'document', extension)
     const written = await writeFresh(dir, name, data)
     const base = path.basename(written)
     const stats = await fsp.stat(written)
-    const origin = { path: base, mtimeMs: stats.mtimeMs, size: stats.size, importedAt: new Date().toISOString() }
+    const origin = { path: onDesktop ? written : base, mtimeMs: stats.mtimeMs, size: stats.size, importedAt: new Date().toISOString() }
     // The stored document is written by READING BACK what just landed on disk:
     // the tab then shows the file, not a hopeful copy of what it meant to write.
     let created = null
@@ -611,7 +705,7 @@ async function handleCreateFile(ctx, request) {
       ok: true,
       format,
       name: base,
-      path: base,
+      path: onDesktop ? written : base,
       absolute: written,
       dir,
       bytes: data.byteLength,
@@ -645,13 +739,13 @@ async function handleSaveFile(ctx, request) {
     if (relative.length === 0) {
       return fail(409, 'NOT_FILE_BACKED', 'This document is not linked to a file; use Export to write one.')
     }
-    const cwd = await sessionRoot(ctx, sessionId)
-    const target = await resolveInside(cwd, relative)
+    // A workspace-relative origin or a Desktop one: `originFile` owns that rule.
+    const target = await originFile(ctx, sessionId, relative)
     let before = null
     try {
       before = await fsp.stat(target)
     } catch (err) {
-      throw httpError(404, 'NOT_FOUND', 'The file is gone from the conversation folder.', err)
+      throw httpError(404, 'NOT_FOUND', 'The file is gone from disk.', err)
     }
     if (payload.force !== true && entry.origin && Number.isFinite(entry.origin.mtimeMs)) {
       const expected = payload.expected && Number.isFinite(payload.expected.mtimeMs) ? payload.expected : entry.origin
@@ -717,9 +811,9 @@ async function handleOpenFile(ctx, request) {
       return json(200, { ok: true, reused: true, document: documentPayload(store.get(sessionId, existing.id)) })
     }
     // Not linked yet (or a deliberate reload): read the file through the same
-    // path the import route uses, and store the result as a linked document.
-    const cwd = await sessionRoot(ctx, sessionId)
-    const target = await resolveInside(cwd, relative)
+    // path the import route uses, and store the result as a linked document. A
+    // Desktop path (a document this package created) is resolved by `originFile`.
+    const target = await originFile(ctx, sessionId, relative)
     const stats = await fsp.stat(target)
     if (!stats.isFile()) return fail(400, 'NOT_FILE', 'The path is not a regular file.')
     const extension = path.extname(target).toLowerCase()
@@ -860,6 +954,11 @@ async function handleFonts(request) {
 /** How long the machine's font list is reused before it is scanned again. */
 const FONT_CACHE_MS = 60_000
 
+/** One error's message, whatever was thrown. */
+function message(err) {
+  return err && err.message ? String(err.message) : String(err)
+}
+
 /**
  * A thrown error → its HTTP response.
  *
@@ -961,13 +1060,162 @@ function jsResponse(state, request) {
 }
 
 /**
- * Activate the plugin row: register the authenticated routes.
- * @param ctx - cordis context (inject: connection).
+ * The vendored Editor.js files this route serves, in the order the browser loads
+ * them, and the global each one leaves behind.
+ *
+ * The list is HERE rather than only in the client because the route has to answer
+ * for exactly these names: an allowlist of six is why a request for anything else
+ * is a 404 instead of a file read, and the `global` recorded in VERSION.json is what
+ * says which file is the core (the one whose absence is a dead tab rather than a
+ * missing tool).
+ */
+const EDITOR_FILES = ['editorjs.umd.js', 'paragraph.umd.js', 'header.umd.js', 'editorjs-list.umd.js', 'quote.umd.js', 'code.umd.js']
+
+/** The vendored Editor.js record (`lib/vendor/editorjs/VERSION.json`), or null. */
+function editorRecord() {
+  try {
+    return JSON.parse(readFileSync(fileURLToPath(new URL('./vendor/editorjs/VERSION.json', import.meta.url)), 'utf8'))
+  } catch (err) {
+    return null
+  }
+}
+
+/**
+ * One vendored Editor.js file, by name.
+ *
+ * The ETag is the sha256 the record carries, so a rebuild that changes the artifact
+ * changes the ETag with no hashing on the request path, and a request for a name
+ * outside the allowlist is a typed 404 rather than a path into the package.
+ *
+ * @param name - the file name from the route.
+ * @param request - the GET/HEAD request.
+ * @returns the response.
+ */
+async function handleEditorFile(name, request) {
+  try {
+    if (!EDITOR_FILES.includes(name)) throw httpError(404, 'NOT_FOUND', 'no such vendored Editor.js file')
+    const file = fileURLToPath(new URL('./vendor/editorjs/' + name, import.meta.url))
+    if (!existsSync(file)) {
+      throw httpError(503, 'VENDOR_MISSING', 'the vendored Editor.js surface is not in this checkout - build it with `node packages/dsh-writing/vendor/editorjs/build.mjs`')
+    }
+    const info = statSync(file)
+    const record = editorRecord()
+    const recorded = record && record.files ? record.files[name] : null
+    const etag = recorded && typeof recorded.sha256 === 'string'
+      ? '"' + recorded.sha256.slice(0, 32) + '"'
+      : '"' + String(info.size) + '-' + String(Math.round(info.mtimeMs)) + '"'
+    if (request && request.headers && request.headers.get('if-none-match') === etag) return new Response(null, { status: 304, headers: { etag } })
+    const headers = { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache', etag, 'content-length': String(info.size) }
+    if (request && request.method === 'HEAD') return new Response(null, { status: 200, headers })
+    return new Response(readFileSync(file), { status: 200, headers })
+  } catch (err) {
+    return errorResponse(err)
+  }
+}
+
+/** Split a `SKILL.md`'s YAML-ish front matter from its content. */
+function parseSkillFile(text) {
+  const normalized = String(text ?? '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n')
+  const match = /^---\n([\s\S]*?)\n---\n?/.exec(normalized)
+  if (!match) return { meta: {}, content: normalized.trim() }
+  const meta = {}
+  for (const line of match[1].split('\n')) {
+    const entry = /^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(line)
+    if (!entry) continue
+    meta[entry[1]] = entry[2].replace(/^["']|["']$/g, '').trim()
+  }
+  return { meta, content: normalized.slice(match[0].length).trim() }
+}
+
+/**
+ * Register the bundled skills.
+ *
+ * A profile without a skill registry still gets them from `$DSH_HOME/skills` (both
+ * installers copy the folders there), so this warns rather than failing - and the
+ * `path` the registration carries is what makes the entry FILE-BACKED, so the
+ * skills browser can show the document the model was given and a person can edit
+ * it in place.
+ *
+ * @param ctx - the cordis context.
+ * @param log - `{ warn }`.
+ * @returns how many skills were registered.
+ */
+export function registerSkills(ctx, log) {
+  const skills = typeof ctx.get === 'function' ? ctx.get('skills') : undefined
+  if (!skills || typeof skills.register !== 'function') {
+    log.warn('skill registry unavailable - the bundled research skill was not registered (the installers copy it into $DSH_HOME/skills anyway)')
+    return 0
+  }
+  let count = 0
+  for (const entry of SKILL_FILES) {
+    try {
+      const file = fileURLToPath(new URL(entry.file, import.meta.url))
+      const { meta, content } = parseSkillFile(readFileSync(file, 'utf8'))
+      if (content.length === 0) {
+        log.warn('skill file is empty: ' + file)
+        continue
+      }
+      const skillName = typeof meta.name === 'string' && meta.name.length > 0 ? meta.name : entry.name
+      ctx.effect(
+        () =>
+          skills.register({
+            name: skillName,
+            description: typeof meta.description === 'string' ? meta.description : '',
+            whenToUse: typeof meta.whenToUse === 'string' ? meta.whenToUse : undefined,
+            content,
+            provider: 'dsh-writing',
+            source: 'bundled',
+            path: file,
+            resourceBase: { kind: 'directory', path: path.dirname(file) },
+          }),
+        'dsh-writing: skill ' + skillName,
+      )
+      count += 1
+    } catch (err) {
+      log.warn('could not register skill ' + entry.name + ': ' + message(err))
+    }
+  }
+  return count
+}
+
+/**
+ * Activate the plugin row: the tools, the bundled skill, then the authenticated
+ * routes.
+ *
+ * THE ORDER IS THE POINT. The tools and the skill do not need the connection
+ * service, and the route block below returns early without it - so registering
+ * them first is what keeps "the agent can write a document" true in a profile whose
+ * web carrier is not mounted.
+ *
+ * @param ctx - cordis context (inject: connection, tools).
  */
 export function apply(ctx) {
+  const log = {
+    warn: (text) => ctx.logger?.warn?.('[dsh-writing] ' + text),
+    info: (text) => ctx.logger?.info?.('[dsh-writing] ' + text),
+  }
+
+  const skillCount = registerSkills(ctx, log)
+
+  // The registry is resolved DEFENSIVELY for the same reason the connection is
+  // below: the tools are registered by this row, and a host whose registry is
+  // replaced (or a check driving this half against a stub context) should leave the
+  // routes working rather than crash the row.
+  const tools = ctx.tools ?? (typeof ctx.get === 'function' ? ctx.get('tools') : undefined)
+  let toolCount = 0
+  if (tools && typeof tools.register === 'function') {
+    for (const tool of buildTools({ stores, log })) {
+      ctx.effect(() => tools.register(tool), 'dsh-writing: tool ' + tool.name)
+      toolCount += 1
+    }
+  } else {
+    log.warn('tool registry unavailable - the writing tools were not registered')
+  }
+  log.info('active: ' + toolCount + ' tool(s), ' + skillCount + ' bundled skill(s), store ' + path.join(resolveHome(), 'dsh-writing'))
+
   const connection = ctx.get ? ctx.get('connection') : undefined
   if (!connection || !connection.fetch || typeof connection.fetch.register !== 'function') {
-    ctx.logger?.warn?.('[dsh-writing] connection service unavailable - document routes not registered')
+    log.warn('connection service unavailable - document routes not registered (the tools and the skill above still work)')
     return
   }
   ctx.effect(() => {
@@ -988,6 +1236,17 @@ export function apply(ctx) {
       connection.fetch.register({ path: OUTLINE_ROUTE, methods: ['GET', 'HEAD'], requestBody: 'buffered', fetch: (request) => handleOutline(ctx, request) }),
       connection.fetch.register({ path: FONTS_ROUTE, methods: ['GET', 'HEAD'], requestBody: 'buffered', fetch: (request) => handleFonts(request) }),
       connection.fetch.register({ path: PAGE_ROUTE, methods: ['GET', 'HEAD'], requestBody: 'buffered', fetch: (request) => handlePage(request) }),
+      // The vendored Editor.js surface: one exact route per file, in the order the
+      // browser loads them (the tools need the core global, and the client appends
+      // the scripts in this order).
+      ...EDITOR_FILES.map((name) =>
+        connection.fetch.register({
+          path: EDITOR_ROUTE + name,
+          methods: ['GET', 'HEAD'],
+          requestBody: 'buffered',
+          fetch: (request) => handleEditorFile(name, request),
+        }),
+      ),
     ]
     return () => {
       for (const dispose of off) {
@@ -1017,9 +1276,13 @@ export const __internals = {
     OUTLINE_ROUTE,
     FONTS_ROUTE,
     PAGE_ROUTE,
+    EDITOR_ROUTE,
   },
   API_ROOT,
   LIBRARY_KEY,
+  EDITOR_FILES,
+  EDITOR_FILE_ROUTES: EDITOR_FILES.map((name) => EDITOR_ROUTE + name),
+  handleEditorFile,
   stores,
   sessionRoot,
   resolveInside,
@@ -1030,4 +1293,7 @@ export const __internals = {
   handlePublish,
   handleImport,
   handleExport,
+  buildTools,
+  registerSkills,
+  SKILL_FILES,
 }

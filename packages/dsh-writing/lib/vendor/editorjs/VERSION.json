@@ -1,0 +1,162 @@
+{
+  "generatedBy": "packages/dsh-writing/vendor/editorjs/build.mjs",
+  "note": "The vendored Editor.js surface for the Writing tab: the core plus the five block tools this pack maps to its own document model, each upstream’s own self-contained UMD browser build (the core injects its CSS, and every tool bundles its own icons and DOM helpers), taken out of the pinned npm tarballs. Nothing is forked and nothing is patched - the only mechanical change is CRLF-to-LF with one trailing newline, because .gitattributes stores text as LF and these bytes are hashed, so a CRLF-hashed file would report phantom drift on every clean checkout. The core is Apache-2.0 and each tool is MIT; the licence text of each travels beside the bundle it covers. `--check` re-hashes every file OFFLINE from this record; each tarball was verified against the registry’s published sha512 before a byte was extracted.",
+  "pins": {
+    "editorjs": "2.31.7",
+    "paragraph": "2.11.7",
+    "header": "2.8.9",
+    "list": "2.0.9",
+    "quote": "2.7.6",
+    "code": "2.9.4"
+  },
+  "integrity": {
+    "@editorjs/editorjs": "sha512-te4wI1heK3B8s0pz1asyRPEmOglfkb9ex5nvvCN5OUVDLSnohTszI+yyLI73qOIuUWxenIvJYkOuGHzh/a47Hw==",
+    "@editorjs/paragraph": "sha512-qD6bbWvRc4VvP0mXDOm+hOhzzhUYR9ZjcAvgCuKWcCbUMpCvhVF1s8NX40zdjekPi6JEnuHTamCncTrSzVsVhw==",
+    "@editorjs/header": "sha512-eBL9/PLDKiE9ADZycmgps3PLz9Lw8w6rPFXr0mfHuhHQI/ynP/q1vLpyruBrRCflTLD2Dlj5nYPoJjL5mP/MFw==",
+    "@editorjs/list": "sha512-rUTgDSt5wygD3Dp24bNyp6vvye/Xf4UWju0ZuvWeP13Z4cu2z1Jb5JFSTEhCou72XUGuf4xVhtsd8cm/bwUS1g==",
+    "@editorjs/quote": "sha512-D01KUMSDj2r+6Z+xjDkQqI+y6URpeHCvj0+P4pah+GtkG040lWjFb2H4pgHFXuol2cbfyAoraYSw85fuPheCvw==",
+    "@editorjs/code": "sha512-c0zyWodNqjL/0WI67sZvACIOFU9IAHG0UeeIpjss8pZGGNBum+UWkh7nKULK0SYvaOrdPdlWWqjuFU1TFA5jUA=="
+  },
+  "licences": {
+    "core": "Apache-2.0",
+    "tools": "MIT"
+  },
+  "homepage": "https://editorjs.io/",
+  "global": "EditorJS",
+  "route": "/api/dsh-writing/vendor/editorjs/",
+  "files": {
+    "editorjs.umd.js": {
+      "from": "package/dist/editorjs.umd.js",
+      "url": "https://registry.npmjs.org/@editorjs/editorjs/-/editorjs-2.31.7.tgz",
+      "package": "@editorjs/editorjs",
+      "version": "2.31.7",
+      "licence": "Apache-2.0",
+      "sha256": "2eb726ea7fd85055be6c9b236b1276631867dab8c55bf16459ea2595d9be47db",
+      "bytes": 244853,
+      "lf": true,
+      "note": "the editor core: the block model, the caret, the toolbar, the block menu, and the CSS, injected by the file itself"
+    },
+    "LICENSE-editorjs.txt": {
+      "from": "package/LICENSE",
+      "url": "https://registry.npmjs.org/@editorjs/editorjs/-/editorjs-2.31.7.tgz",
+      "package": "@editorjs/editorjs",
+      "version": "2.31.7",
+      "licence": "Apache-2.0",
+      "sha256": "b946f387bbb7de6843c0db34f87a8956f229d220b3bf81b16b8425788cacf3ed",
+      "bytes": 10761,
+      "lf": true,
+      "note": "Editor.js is Apache-2.0; this is the text the distribution ships beside the artifact"
+    },
+    "paragraph.umd.js": {
+      "from": "package/dist/paragraph.umd.js",
+      "url": "https://registry.npmjs.org/@editorjs/paragraph/-/paragraph-2.11.7.tgz",
+      "package": "@editorjs/paragraph",
+      "version": "2.11.7",
+      "licence": "MIT",
+      "sha256": "58c39c0ad2f93619bbe0081d9b8b6a81f829169918d6305684b593f1634163ea",
+      "bytes": 2988,
+      "lf": true,
+      "note": "the default text block - a single contenteditable, which is why this package replaces it with one that carries this pack’s marks"
+    },
+    "LICENSE-paragraph.txt": {
+      "from": "package/LICENSE",
+      "url": "https://registry.npmjs.org/@editorjs/paragraph/-/paragraph-2.11.7.tgz",
+      "package": "@editorjs/paragraph",
+      "version": "2.11.7",
+      "licence": "MIT",
+      "sha256": "99f040592bf043fe713fc7fce61132cb74cb7c6cfc81be0ccb2d5be93282a098",
+      "bytes": 1062,
+      "lf": true,
+      "note": "the Paragraph tool is MIT"
+    },
+    "header.umd.js": {
+      "from": "package/dist/header.umd.js",
+      "url": "https://registry.npmjs.org/@editorjs/header/-/header-2.8.9.tgz",
+      "package": "@editorjs/header",
+      "version": "2.8.9",
+      "licence": "MIT",
+      "sha256": "4a41c871c64dee885fe3eedd26654a759aac772cc974e4e9cded8cc944a35c57",
+      "bytes": 6723,
+      "lf": true,
+      "note": "the heading block, levels 1-6 - the model’s own heading range"
+    },
+    "LICENSE-header.txt": {
+      "from": "package/LICENSE",
+      "url": "https://registry.npmjs.org/@editorjs/header/-/header-2.8.9.tgz",
+      "package": "@editorjs/header",
+      "version": "2.8.9",
+      "licence": "MIT",
+      "sha256": "99f040592bf043fe713fc7fce61132cb74cb7c6cfc81be0ccb2d5be93282a098",
+      "bytes": 1062,
+      "lf": true,
+      "note": "the Header tool is MIT"
+    },
+    "editorjs-list.umd.js": {
+      "from": "package/dist/editorjs-list.umd.js",
+      "url": "https://registry.npmjs.org/@editorjs/list/-/list-2.0.9.tgz",
+      "package": "@editorjs/list",
+      "version": "2.0.9",
+      "licence": "MIT",
+      "sha256": "debc67131a021fc794652fabe1cab901eec73abfdc8859be51d612a3e709886e",
+      "bytes": 49355,
+      "lf": true,
+      "note": "the list block (ordered and unordered, with nesting) - the largest of the six, because the tool ships its own icons and DOM helpers"
+    },
+    "LICENSE-list.txt": {
+      "from": "package/LICENSE",
+      "url": "https://registry.npmjs.org/@editorjs/list/-/list-2.0.9.tgz",
+      "package": "@editorjs/list",
+      "version": "2.0.9",
+      "licence": "MIT",
+      "sha256": "03a89e2de7e6e09b1ae79da098cdd5663168fddf174bfd7c1e9c15cc8dc66901",
+      "bytes": 1062,
+      "lf": true,
+      "note": "the List tool is MIT"
+    },
+    "quote.umd.js": {
+      "from": "package/dist/quote.umd.js",
+      "url": "https://registry.npmjs.org/@editorjs/quote/-/quote-2.7.6.tgz",
+      "package": "@editorjs/quote",
+      "version": "2.7.6",
+      "licence": "MIT",
+      "sha256": "5148cdbf4318d30da8b1756b004e899773761755e143ab986fffc848328f41ee",
+      "bytes": 24690,
+      "lf": true,
+      "note": "the quote block: the text the model holds, plus a caption the model folds into it as a second line"
+    },
+    "LICENSE-quote.txt": {
+      "from": "package/LICENSE",
+      "url": "https://registry.npmjs.org/@editorjs/quote/-/quote-2.7.6.tgz",
+      "package": "@editorjs/quote",
+      "version": "2.7.6",
+      "licence": "MIT",
+      "sha256": "99f040592bf043fe713fc7fce61132cb74cb7c6cfc81be0ccb2d5be93282a098",
+      "bytes": 1062,
+      "lf": true,
+      "note": "the Quote tool is MIT"
+    },
+    "code.umd.js": {
+      "from": "package/dist/code.umd.js",
+      "url": "https://registry.npmjs.org/@editorjs/code/-/code-2.9.4.tgz",
+      "package": "@editorjs/code",
+      "version": "2.9.4",
+      "licence": "MIT",
+      "sha256": "ea43829cdc5b3e8a73bb9dd36892ed25c97589de5995420438f46803bbb0534b",
+      "bytes": 2935,
+      "lf": true,
+      "note": "the code block: a plain textarea, so a code block round trips as exactly the characters that were typed"
+    },
+    "LICENSE-code.txt": {
+      "from": "package/LICENSE",
+      "url": "https://registry.npmjs.org/@editorjs/code/-/code-2.9.4.tgz",
+      "package": "@editorjs/code",
+      "version": "2.9.4",
+      "licence": "MIT",
+      "sha256": "99f040592bf043fe713fc7fce61132cb74cb7c6cfc81be0ccb2d5be93282a098",
+      "bytes": 1062,
+      "lf": true,
+      "note": "the Code tool is MIT"
+    }
+  },
+  "digest": "b121e034ca5a70fc68ad223d31f436e44494bebd58983bd446e75977923bf8c7"
+}

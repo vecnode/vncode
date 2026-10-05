@@ -68,10 +68,27 @@ const storeRoot = path.join(home, 'dsh-writing')
 async function capture(modulePath) {
   const module = await import(pathToFileURL(modulePath).href)
   const routes = new Map()
+  const tools = []
+  const skills = []
   const context = {
     effect: (fn) => fn(),
-    logger: { debug() {}, warn() {} },
+    logger: { debug() {}, warn() {}, info() {} },
+    tools: {
+      register(tool) {
+        tools.push(tool)
+        return () => {}
+      },
+    },
     get(name) {
+      if (name === 'skills') {
+        return {
+          register(skill) {
+            skills.push(skill)
+            return () => {}
+          },
+        }
+      }
+      if (name === 'tools') return context.tools
       if (name === 'connection') {
         return {
           fetch: {
@@ -100,10 +117,10 @@ async function capture(modulePath) {
     },
   })
   module.apply(context)
-  return { module, routes }
+  return { module, routes, tools, skills }
 }
 
-const { module: host, routes } = await capture(path.join(writingDir, 'lib', 'index.js'))
+const { module: host, routes, tools: registeredTools, skills: registeredSkills } = await capture(path.join(writingDir, 'lib', 'index.js'))
 const R = host.__internals.ROUTES
 const request = (routePathWithQuery, init) => {
   // A route is registered at an EXACT path, so the query string is the handler's
@@ -511,8 +528,8 @@ const createdByRoute = await (await post(R.DOCUMENT_ROUTE, { session: otherSessi
 check('the document route creates a document', createdByRoute.ok, true)
 check('and answers with its blocks', createdByRoute.document.blocks.length, 2)
 check('and with its geometry', createdByRoute.document.widthMm, 210)
-const readBack = await (await request(R.DOCUMENT_ROUTE + '?session=' + otherSession + '&id=' + createdByRoute.document.id)).json()
-check('the document route reads it back', readBack.document.blocks[1].runs[0].text, 'written through the route')
+const toolReadBack = await (await request(R.DOCUMENT_ROUTE + '?session=' + otherSession + '&id=' + createdByRoute.document.id)).json()
+check('the document route reads it back', toolReadBack.document.blocks[1].runs[0].text, 'written through the route')
 const saved = await (await post(R.DOCUMENT_ROUTE, { session: otherSession, id: createdByRoute.document.id, title: 'Route Note', blocks: [{ type: 'paragraph', runs: [{ text: 'edited', marks: [] }] }], expectedRevision: createdByRoute.document.revision })).json()
 check('a save with the current revision lands', saved.ok, true)
 const stale = await post(R.DOCUMENT_ROUTE, { session: otherSession, id: createdByRoute.document.id, blocks: [], expectedRevision: createdByRoute.document.revision })
@@ -521,8 +538,8 @@ check('and names the code', (await stale.json()).error.code, 'CONFLICT')
 check('the library scope is its own store', (await (await post(R.DOCUMENT_ROUTE, { scope: 'library', title: 'In the library', blocks: [{ type: 'paragraph', runs: [{ text: 'shared', marks: [] }] }] })).json()).ok, true)
 const libraryRead = await (await request(R.DOCUMENT_ROUTE + '?scope=library&id=in-the-library')).json()
 check('a library document is readable by id alone', libraryRead.document.blocks[0].runs[0].text, 'shared')
-const published = await (await post(R.PUBLISH_ROUTE, { session: otherSession, id: createdByRoute.document.id })).json()
-check('publishing from a conversation answers with the library id', published.document.scope, 'library')
+const toolPublished = await (await post(R.PUBLISH_ROUTE, { session: otherSession, id: createdByRoute.document.id })).json()
+check('publishing from a conversation answers with the library id', toolPublished.document.scope, 'library')
 check('publish copies the CONTENT that was saved', (await (await request(R.DOCUMENT_ROUTE + '?scope=library&id=' + createdByRoute.document.id)).json()).document.blocks[0].runs[0].text, 'edited')
 
 console.log('')
@@ -571,8 +588,53 @@ const workspaceReal = await fsp.realpath(workspace)
 check('an export name cannot leave the folder', path.dirname(traversal.absolute) === workspaceReal, true)
 check('and the separators are gone from the name', traversal.name.includes('/') || traversal.name.includes('\\'), false)
 check('the exported page keeps the geometry it was saved with', ooxml.readDocx(await fsp.readFile(path.join(workspace, traversal.name))).document.page.size, 'a4')
-// `target: 'desktop'` is deliberately NOT driven here: it writes to the real
-// Desktop of whoever runs the check, and a check may not touch somebody's home.
+
+// ---------------------------------------------------------------------------
+// The DESKTOP export, and the proof copy that goes with it.
+//
+// `target: 'desktop'` writes to `desktopDir()`, which is `os.homedir()/Desktop`.
+// A check may not touch somebody's real home, so HOME (and, on Windows, the
+// variables os.homedir() reads) are pointed at this check's own temp folder for
+// the duration - and the assertion is made against `os.homedir()` rather than
+// against a spelling this check guessed, so it holds on both families. No env
+// var is left changed.
+// ---------------------------------------------------------------------------
+{
+  const saved = {}
+  for (const key of ['HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH']) {
+    saved[key] = process.env[key]
+    process.env[key] = key === 'HOMEDRIVE' ? path.parse(home).root.replace(/[\\/]$/, '') : key === 'HOMEPATH' ? home.replace(/^[A-Za-z]:/, '') : home
+  }
+  try {
+    const targetHome = os.homedir()
+    await fsp.mkdir(path.join(targetHome, 'Desktop'), { recursive: true })
+    // A name no other export in this check could have taken, so "it is not in the
+    // workspace" is about the TARGET and not about a collision with an earlier file.
+    const desktopOnly = await (await post(R.EXPORT_ROUTE, { session: SESSION, id: created.id, format: 'docx', target: 'desktop', name: 'Desktop only.docx' })).json()
+    check('a Desktop export names where it went', typeof desktopOnly.dir === 'string' && desktopOnly.dir.length > 0, true)
+    check('and the file is there', existsSync(path.join(targetHome, 'Desktop', desktopOnly.name)), true)
+    check('a Desktop export is a real .docx', ooxml.readDocx(await fsp.readFile(path.join(targetHome, 'Desktop', desktopOnly.name))).meta.parts.length > 5, true)
+    check('a plain Desktop export leaves no proof copy', desktopOnly.previewPath, null)
+    check('and nothing was written into the conversation folder for it', existsSync(path.join(workspace, desktopOnly.name)), false)
+    // PROOF: the same bytes land on the Desktop AND as a workspace copy the shipped
+    // preview can read, and only the workspace one is handed to the preview.
+    const proof = await (await post(R.EXPORT_ROUTE, { session: SESSION, id: created.id, format: 'docx', target: 'desktop', proof: true })).json()
+    check('a proof still lands on the Desktop', existsSync(path.join(targetHome, 'Desktop', proof.name)), true)
+    check('a proof names a workspace copy to render', typeof proof.previewPath === 'string' && proof.previewPath.endsWith('.docx'), true)
+    check('the proof copy is inside the conversation folder', existsSync(path.join(workspace, proof.previewPath)), true)
+    check('the proof copy IS the desktop file', (await fsp.readFile(path.join(workspace, proof.previewPath))).equals(await fsp.readFile(path.join(targetHome, 'Desktop', proof.name))), true)
+    check('the proof copy is not named like an export', proof.previewPath.includes('-proof-'), true)
+    const proofAgain = await (await post(R.EXPORT_ROUTE, { session: SESSION, id: created.id, format: 'docx', target: 'desktop', proof: true })).json()
+    check('a second proof does not overwrite the first', proofAgain.previewPath !== proof.previewPath, true)
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+  check('the check left the home variables as it found them', process.env.HOME, saved.HOME)
+}
+
 check('an unknown document is a 404', (await post(R.EXPORT_ROUTE, { session: SESSION, id: 'nope' })).status, 404)
 check('an unimportable session is a typed failure', (await post(R.IMPORT_ROUTE, { session: 'no-such-session', path: 'x.docx' })).status, 409)
 
@@ -720,6 +782,67 @@ const fresh = await (await post(R.OPEN_FILE_ROUTE, { session: IO_SESSION, path: 
 check('opening an unrelated file imports it', fresh.reused, false)
 check('and links it to that path', fresh.document.origin.path, 'opened-fresh.docx')
 check('an unreadable extension is refused with the way out', (await post(R.OPEN_FILE_ROUTE, { session: IO_SESSION, path: 'old.doc' })).status, 415)
+
+// ---------------------------------------------------------------------------
+// A DOCUMENT CREATED ON THE DESKTOP.
+//
+// `target: 'desktop'` is what the tab's New button sends: the `.docx` is written
+// where the person will look for it, and the stored document is linked to THAT
+// absolute path - so every later Save writes the file they can open in Word.
+// `originFile` is what makes it safe: a relative origin stays inside the workspace,
+// an absolute one is only accepted when its own folder IS the Desktop, and anything
+// else is a typed refusal rather than a write. `os.homedir()` is pointed at this
+// check's temp folder for the duration, as the export block below does.
+// ---------------------------------------------------------------------------
+{
+  const savedEnv = {}
+  for (const key of ['HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH']) {
+    savedEnv[key] = process.env[key]
+    process.env[key] = key === 'HOMEDRIVE' ? path.parse(home).root.replace(/[\\/]$/, '') : key === 'HOMEPATH' ? home.replace(/^[A-Za-z]:/, '') : home
+  }
+  try {
+    const targetHome = os.homedir()
+    const desktop = path.join(targetHome, 'Desktop')
+    await fsp.mkdir(desktop, { recursive: true })
+    const made = await (await post(R.CREATE_FILE_ROUTE, { session: IO_SESSION, format: 'docx', name: 'On the desktop', title: 'On the desktop', target: 'desktop' })).json()
+    check('New writes the document to the Desktop', existsSync(path.join(desktop, made.name)), true)
+    check('and names the directory it went to', made.dir, desktop)
+    check('the document is linked to that absolute path', made.document.origin.path, path.join(desktop, made.name))
+    check('the Desktop file is a real .docx', ooxml.readDocx(await fsp.readFile(path.join(desktop, made.name))).meta.parts.length > 5, true)
+    check('and nothing was left in the conversation folder', existsSync(path.join(workspace, made.name)), false)
+    // Saving a typed block writes THAT file, not a copy somewhere else.
+    const edited = await (await post(R.DOCUMENT_ROUTE, {
+      session: IO_SESSION,
+      id: made.document.id,
+      title: 'On the desktop',
+      blocks: [{ type: 'paragraph', runs: [{ text: 'typed on the desktop', marks: [] }] }],
+      expectedRevision: made.document.revision,
+    })).json()
+    check('the Desktop document saves into the store', edited.ok, true)
+    const writtenBack = await (await post(R.SAVE_FILE_ROUTE, { session: IO_SESSION, id: made.document.id })).json()
+    check('and Save writes the Desktop file', writtenBack.ok, true)
+    check('with the text that was typed', ooxml.blockLines(ooxml.readDocx(await fsp.readFile(path.join(desktop, made.name))).document).join('|'), 'typed on the desktop')
+    // An absolute path that is NOT the Desktop is refused, not resolved. The rule is
+    // driven through `open-file` with an absolute path, because that route reaches the
+    // same containment check the write-back uses - and passing an absolute path in
+    // `path` is exactly the call a client must not be able to get away with.
+    const elsewhere = path.join(targetHome, 'elsewhere')
+    await fsp.mkdir(elsewhere, { recursive: true })
+    await fsp.writeFile(path.join(elsewhere, 'rogue.docx'), 'not a docx')
+    const rogue = await post(R.OPEN_FILE_ROUTE, { session: IO_SESSION, path: path.join(elsewhere, 'rogue.docx') })
+    const rogueBody = await rogue.clone().json()
+    check('an absolute path outside the Desktop is refused', rogue.status, 403)
+    check('and says why', rogueBody.error.code, 'OUTSIDE_WORKSPACE')
+    const desktopPath = await post(R.OPEN_FILE_ROUTE, { session: IO_SESSION, path: path.join(desktop, made.name), reload: true })
+    check('the Desktop path of a document this package made is honoured', desktopPath.status, 200)
+    check('and reads that document back', (await desktopPath.json()).document.origin.path, path.join(desktop, made.name).replaceAll('\\', '/'))
+  } finally {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+  }
+}
 
 console.log('')
 console.log('--- the outline ---')
@@ -959,6 +1082,230 @@ for (const [label, method, path, body] of sweep) {
   check('route answers: ' + label + ' (status)', answer.status, 200)
   check('route answers: ' + label + ' (ok)', parsed ? parsed.ok === true : text.slice(0, 80), true)
 }
+
+console.log('')
+console.log('--- the vendored Editor.js surface ---')
+// The artifacts the Writing tab edits in are committed and hashed by
+// `packages/dsh-writing/vendor/editorjs/build.mjs`. What this drives is the half a
+// check can run on any machine with no npm: every recorded file hashes to what the
+// record says AND the host serves exactly those names, with the recorded ETag and a
+// 304 for a client that already has them.
+{
+  const vendorDir = path.join(writingDir, 'lib', 'vendor', 'editorjs')
+  const record = JSON.parse(await fsp.readFile(path.join(vendorDir, 'VERSION.json'), 'utf8'))
+  const { createHash } = await import('node:crypto')
+  check('the record names the pinned core', record.pins.editorjs, '2.31.7')
+  check('the record carries the tarball integrity of every package', Object.keys(record.integrity).length, 6)
+  check('the core is Apache-2.0 and the tools are MIT', record.licences.core + '/' + record.licences.tools, 'Apache-2.0/MIT')
+  let hashed = 0
+  let wrong = 0
+  for (const [name, meta] of Object.entries(record.files)) {
+    const bytes = await fsp.readFile(path.join(vendorDir, name))
+    const digest = createHash('sha256').update(bytes).digest('hex')
+    hashed += 1
+    if (digest !== meta.sha256 || bytes.length !== meta.bytes) wrong += 1
+  }
+  check('every recorded artifact is up to date with its file', wrong, 0)
+  check('the record covers the core, five tools and six licences', hashed, 12)
+  check('the allowlist is the six scripts the record carries', host.__internals.EDITOR_FILES.length, 6)
+  check(
+    'every allowlisted name is a recorded file',
+    host.__internals.EDITOR_FILES.every((name) => Boolean(record.files[name])) && host.__internals.EDITOR_FILES.every((name) => record.files[name].package.startsWith('@editorjs/')),
+    true,
+  )
+  // The routes: one exact path per file, the recorded bytes, the recorded ETag.
+  for (const name of host.__internals.EDITOR_FILES) {
+    const routePath = R.EDITOR_ROUTE + name
+    const answer = await request(routePath)
+    const text = await answer.text()
+    check('the editor route answers ' + name, answer.status, 200)
+    check('  ...as JavaScript', answer.headers.get('content-type'), 'text/javascript; charset=utf-8')
+    check('  ...with the bytes the record hashed', createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex'), record.files[name].sha256)
+    const etag = answer.headers.get('etag')
+    check('  ...and an ETag from the record', etag, '"' + record.files[name].sha256.slice(0, 32) + '"')
+    const revalidated = await request(routePath, { headers: { 'if-none-match': etag } })
+    check('  ...which revalidates to a 304', revalidated.status, 304)
+  }
+  // The route is registered at an EXACT path per file, so a name outside the
+  // allowlist has no route at all - not a file read that happens to fail. Both
+  // halves of that are asserted: nothing else under the prefix is registered, and
+  // the allowlist itself is a fixed list.
+  const editorRoutes = [...routes.keys()].filter((key) => key.startsWith(R.EDITOR_ROUTE))
+  check('one exact route per vendored file, and nothing else', editorRoutes.length, host.__internals.EDITOR_FILES.length)
+  check('every editor route is an allowlisted name', editorRoutes.every((key) => host.__internals.EDITOR_FILES.includes(key.slice(R.EDITOR_ROUTE.length))), true)
+  check('a traversal-looking name is not in the allowlist', host.__internals.EDITOR_FILES.includes('../package.json'), false)
+  const refused = await host.__internals.handleEditorFile('../package.json', new Request('http://x'))
+  check('the handler refuses a name outside the allowlist', refused.status, 404)
+
+  // -------------------------------------------------------------------------
+  // The model <-> Editor.js bridge: the SAME cases the client's own copy is
+  // driven with in `check-client-bundles.mjs`, because the two implementations
+  // cannot share code (one bundle has no imports; the other may touch no DOM).
+  // -------------------------------------------------------------------------
+  console.log('')
+  console.log('--- the Editor.js bridge ---')
+  const bridge = await import(pathToFileURL(path.join(writingDir, 'lib', 'editorjs.js')).href)
+  const dom = bridge.plainTextDom()
+  const page = model.defaultPage()
+  const bridgeDoc = {
+    page,
+    font: '',
+    fontSize: 12,
+    blocks: [
+      { type: 'heading', level: 2, runs: [{ text: 'A heading', marks: [] }] },
+      { type: 'paragraph', runs: [{ text: 'plain text', marks: [] }] },
+      { type: 'listItem', ordered: false, level: 0, runs: [{ text: 'one', marks: [] }] },
+      { type: 'listItem', ordered: false, level: 1, runs: [{ text: 'nested', marks: [] }] },
+      { type: 'listItem', ordered: false, level: 0, runs: [{ text: 'two', marks: [] }] },
+      { type: 'quote', runs: [{ text: 'quoted', marks: [] }] },
+      { type: 'code', runs: [{ text: 'const x = 1', marks: [] }] },
+      { type: 'pageBreak', runs: [{ text: '', marks: [] }] },
+    ],
+  }
+  const data = bridge.toEditorData(bridgeDoc, dom, 1700000000000)
+  check('the bridge stamps the time it is given', data.time, 1700000000000)
+  check('the bridge maps every block type', data.blocks.map((block) => block.type).join(','), 'header,paragraph,list,quote,code,delimiter')
+  check('the heading carries its level', data.blocks[0].data.level, 2)
+  check('the list NESTS the deeper level', data.blocks[2].data.items[0].items.length, 1)
+  check('the list keeps the sibling at the root', data.blocks[2].data.items.length, 2)
+  check('the code carries its characters', data.blocks[4].data.code, 'const x = 1')
+  const back = bridge.fromEditorData(data, dom)
+  check('the round trip keeps every block type', back.blocks.map((block) => block.type).join(','), 'heading,paragraph,listItem,listItem,listItem,quote,code,pageBreak')
+  check('the round trip keeps the heading level', back.blocks[0].level, 2)
+  check('the round trip keeps the nested level', back.blocks[3].level, 1)
+  check('the round trip keeps the words', back.blocks.map((block) => (block.runs ?? []).map((run) => run.text).join('')).join('|'), 'A heading|plain text|one|nested|two|quoted|const x = 1|')
+  check('a page break is reported, not silently dropped', back.losses.some((entry) => entry.kind === 'page break'), true)
+  // A document with no page break reports nothing, and a block the surface does not
+  // have is kept as a paragraph WITH its text and reported.
+  const plain = bridge.fromEditorData(bridge.toEditorData({ blocks: [{ type: 'paragraph', runs: [{ text: 'x', marks: [] }] }] }, dom), dom)
+  check('a document with no loss reports none', plain.losses.length, 0)
+  const unknown = bridge.fromEditorData({ blocks: [{ id: 'a', type: 'table', data: { text: 'cells' } }] }, dom)
+  check('an unknown block becomes a paragraph', unknown.blocks[0].type, 'paragraph')
+  check('an unknown block keeps its text', unknown.blocks[0].runs.map((run) => run.text).join(''), 'cells')
+  check('an unknown block is reported', unknown.losses.some((entry) => entry.kind === 'block type the editor does not have'), true)
+  // The two halves must agree on the SHAPE the client sends: a document with the
+  // document's own typography set and a run that names its own family is exactly
+  // what `runTypographyLosses` is for.
+  const typed = bridge.runTypographyLosses([{ type: 'paragraph', runs: [{ text: 'x', marks: [], font: 'Georgia', size: 14 }, { text: 'y', marks: [] }] }])
+  check('per-run typography is reported as a loss', typed.length > 0 && typed[0].count, 1)
+  check('a document with no run typography reports no typography loss', bridge.runTypographyLosses([{ type: 'paragraph', runs: [{ text: 'x', marks: [] }] }]).length, 0)
+}
+
+// ---------------------------------------------------------------------------
+// The tools and the bundled skill: what this row adds for the AGENT.
+//
+// The tools are driven through `execute()` with a stub run context, so the REAL
+// store the tab reads is what runs - including its budgets, its optimistic
+// concurrency and its typed refusals - and the claims asserted here are the ones
+// a model would depend on: that a document it wrote is listed, that reading it
+// back gives the marks back, and that the things the model cannot express (a
+// table, a workbook) are REFUSED out loud rather than silently flattened.
+// ---------------------------------------------------------------------------
+console.log('')
+console.log('--- the model-facing tools ---')
+check('three tools are registered', registeredTools.map((entry) => entry.name).join(','), 'writing_list,writing_read,writing_write')
+check(
+  'every tool declares a JSON-schema surface',
+  registeredTools.every(
+    (entry) =>
+      typeof entry.description === 'string' &&
+      entry.description.length > 40 &&
+      entry.parameters &&
+      entry.parameters.type === 'object' &&
+      Object.keys(entry.parameters.properties ?? {}).length > 0 &&
+      (entry.parameters.required ?? []).every((key) => Object.hasOwn(entry.parameters.properties, key)) &&
+      entry.output &&
+      entry.output.schema &&
+      typeof entry.output.render === 'function' &&
+      typeof entry.execute === 'function',
+  ),
+  true,
+)
+const tool = (name) => registeredTools.find((entry) => entry.name === name)
+/** The failure message of a call that must fail, or '' when it did not. */
+async function fails(fn) {
+  try {
+    await fn()
+    return ''
+  } catch (err) {
+    return err && err.message ? String(err.message) : String(err)
+  }
+}
+
+const TOOL_SESSION = 'session-tools'
+const exec = { agent: { session: { id: TOOL_SESSION } } }
+const toolBody = ['## Findings', '', '- one', '- two', '', 'Some **bold** text.'].join('\n')
+const written = await tool('writing_write').execute({ title: 'Tool check', markdown: toolBody }, exec)
+check('writing_write creates a document', written.created, true)
+check('  ...under the slug of its title', written.id, 'tool-check')
+check('  ...and counts its words', written.words, 6)
+check('  ...in the conversation store', written.scope, 'conversation')
+check('  ...at revision 1', written.revision, 1)
+
+const listed = await tool('writing_list').execute({}, exec)
+check('writing_list answers the document', listed.documents.map((entry) => entry.id).join(','), 'tool-check')
+check('  ...with its kind', listed.documents[0].kind, 'page')
+
+const writtenBack = await tool('writing_read').execute({ id: 'tool-check' }, exec)
+check('writing_read returns the block count', writtenBack.blocks, 4)
+check('  ...and the Markdown body', writtenBack.markdown, '## Findings\n- one\n- two\nSome **bold** text.\n')
+check('  ...title separate from the body', writtenBack.title, 'Tool check')
+const asBlocks = await tool('writing_read').execute({ id: 'tool-check', format: 'blocks' }, exec)
+check('  ...and the block model on request', JSON.parse(asBlocks.model).blocks.map((block) => block.type).join(','), 'heading,listItem,listItem,paragraph')
+
+const again = await tool('writing_write').execute({ id: 'tool-check', markdown: 'Rewritten.' }, exec)
+check('a second write REPLACES, keeping the id', again.id, 'tool-check')
+check('  ...and keeps the title it was not given', again.title, 'Tool check')
+check('  ...and moves the revision', again.revision, 2)
+check('  ...and reports itself as a replacement', again.created, false)
+const conflicted = await fails(() => tool('writing_write').execute({ id: 'tool-check', markdown: 'x', expectedRevision: 1 }, exec))
+check('a stale expectedRevision is REFUSED, not clobbered', conflicted.includes('CONFLICT') && conflicted.includes('revision 2'), true)
+const missing = await fails(() => tool('writing_read').execute({ id: 'nope' }, exec))
+check('reading an unknown id names what the store holds', missing.includes('no document "nope"') && missing.includes('tool-check'), true)
+
+// What the model may NOT express is refused rather than flattened. A Markdown
+// table has no block in this model, so it arrives as pipe-delimited paragraphs -
+// and the tool description says so, which is the only honest option.
+const table = await tool('writing_write').execute({ title: 'Table check', markdown: '| a | b |\n| --- | --- |\n| 1 | 2 |' }, exec)
+const tableBlocks = JSON.parse((await tool('writing_read').execute({ id: table.id, format: 'blocks' }, exec)).model).blocks
+check('a Markdown table becomes paragraphs, never a table', tableBlocks.map((block) => block.type).join(','), 'paragraph,paragraph,paragraph')
+check('  ...with the pipes kept as text', tableBlocks[0].runs.map((run) => run.text).join(''), '| a | b |')
+
+// A workbook is a different surface with a different model: the page tools say so
+// instead of writing over its sheets.
+host.__internals.stores().conversation.write(TOOL_SESSION, { id: 'book', kind: 'sheet', title: 'Book' })
+const workbook = await fails(() => tool('writing_write').execute({ id: 'book', title: 'Nope', markdown: 'x' }, exec))
+check('a workbook is refused, and named as one', workbook.includes('WORKBOOK'), true)
+
+// The library scope is the SAME store the tab publishes into.
+const freshPublish = await tool('writing_write').execute({ scope: 'library', title: 'Shared note', markdown: 'Shared.' }, exec)
+const libraryList = await tool('writing_list').execute({ scope: 'library' }, exec)
+check('the library scope publishes to the shared store', libraryList.documents.some((entry) => entry.id === freshPublish.id), true)
+check('  ...and the conversation store does not hold it', (await tool('writing_list').execute({}, exec)).documents.some((entry) => entry.id === freshPublish.id), false)
+
+// ---------------------------------------------------------------------------
+// The bundled skill: the one METHOD skill this pack ships.
+// ---------------------------------------------------------------------------
+console.log('')
+console.log('--- the bundled research skill ---')
+check('one skill is registered', registeredSkills.length, 1)
+const skill = registeredSkills[0] ?? {}
+check('  ...named research', skill.name, 'research')
+check('  ...with a description the model can choose on', typeof skill.description === 'string' && skill.description.length > 200, true)
+check('  ...and a whenToUse', typeof skill.whenToUse === 'string' && skill.whenToUse.length > 40, true)
+check('  ...registered from its own file', typeof skill.path === 'string' && existsSync(skill.path), true)
+check('  ...carrying the rule a review lives by', String(skill.content).includes('No identifier you have not fetched'), true)
+check('  ...and the step that writes the document', String(skill.content).includes('writing_write'), true)
+// Every reference file the skill names must be there: a skill that points at a
+// document it does not ship sends the agent into an empty read.
+const referenced = [...new Set(String(skill.content).match(/reference\/[a-z0-9-]+\.md/g) ?? [])]
+check('the skill names its reference files', referenced.length >= 2, true)
+check(
+  'every referenced file is shipped',
+  referenced.every((rel) => existsSync(path.join(path.dirname(skill.path), rel))),
+  true,
+)
+check('the skill is not a page of prose alone', String(skill.content).split('\n').length > 80, true)
 
 // ---------------------------------------------------------------------------
 console.log('')

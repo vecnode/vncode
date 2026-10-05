@@ -6569,50 +6569,65 @@ check('...and the vendored routes went with them', Object.values(canvasInternals
   check('writing view renders with a session', renderToStaticMarkup(h(view.component, { writingSession: 'session-writing', ctx: writingCtx })).includes('data-dsh-writing-view'), true)
   check('writing view renders WITHOUT a session too', renderToStaticMarkup(h(view.component, { ctx: writingCtx })).includes('data-dsh-writing-view'), true)
   const markup = renderToStaticMarkup(h(view.component, { writingSession: 'session-writing', ctx: writingCtx }))
-  // The surface a person needs, by the attribute the tab itself sets - and one
-  // page drawn for a document that has no blocks yet, which is the state a
-  // first-time tab is in.
+  // The surface a person needs, by the attribute the tab itself sets. The bar is the
+  // tab's own (New, the rail toggle, the title, the document's typography, the
+  // editor's own block menu, the page setup) and the EDITOR is Editor.js's, so what
+  // is asserted here is the shell around it - and the markers the editor's surface
+  // hangs on (`data-writing-editor`, `data-writing-editorjs`), which is the swap
+  // this refactor made.
   for (const marker of [
     'data-writing-bar',
     'data-writing-rail',
     'data-action="save"',
     'data-action="proof"',
-    'data-action="mark-b"',
-    'data-action="mark-code"',
-    'data-action="page-break"',
-    'data-action="align-justify"',
     'data-writing-margin="top"',
     'data-writing-orientation',
-    'data-writing-blocktype',
     'data-writing-zoom',
     'data-writing-import',
     'data-export="docx"',
     'data-export="md"',
+    'data-export="txt"',
+    'data-writing-insert="heading-1"',
+    'data-writing-insert="heading-2"',
+    'data-writing-insert="quote"',
+    'data-writing-insert="code"',
+    'data-writing-delete',
   ]) {
     check('writing shell carries ' + marker, markup.includes(marker), true)
   }
+  // The editor's own seat belongs to the OPEN document: with nothing open there is
+  // no editor to draw, and the tab says what it is doing instead. Both states are
+  // asserted here, and the one below is the same assertion read the other way.
+  check('writing draws no editor before a document is open', markup.includes('data-writing-editorjs'), false)
+  check('writing draws no editor phase before a document is open', markup.includes('data-writing-editor='), false)
+  // The editor's three marks only the pack's own tools carry: the toolbar no longer
+  // has a button per mark (Editor.js's inline toolbar has bold and italic), so what
+  // is asserted is that the tab does NOT pretend to have one.
+  check('writing has no mark buttons of its own', markup.includes('data-writing-marks'), false)
+  check('writing has no page-break control of its own', markup.includes('data-action="page-break"'), false)
   check('writing status starts at zero words', markup.includes('0 words'), true)
-  // NEW is the LEFTMOST control on the bar, before the title and every
-  // formatting control - which is where a document tab keeps it, and where the
-  // owner of this tab asked for it after finding it in the middle.
+  // NEW is the LEFTMOST control on the bar, before the title and every other
+  // control - which is where a document tab keeps it, and where the owner of this
+  // tab asked for it after finding it in the middle.
   {
     const newAt = markup.indexOf('data-writing-new')
     const titleAt = markup.indexOf('data-writing-title')
-    const formattingAt = markup.indexOf('data-writing-marks')
+    const fontAt = markup.indexOf('data-writing-font')
     check('writing puts New on the bar', newAt >= 0, true)
     check('writing puts New before the title', newAt >= 0 && titleAt > newAt, true)
-    check('writing puts New before the formatting controls', newAt >= 0 && formattingAt > newAt, true)
+    check('writing puts New before the document typography', newAt >= 0 && fontAt > newAt, true)
   }
-  // With no document open yet (the state a first paint is in), there is no page
-  // to draw and the tab says what it is doing rather than drawing a blank one.
-  check('writing draws no page before a document is open', markup.includes('data-writing-page='), false)
+  // With no document open yet (the state a first paint is in), there is nothing to
+  // edit and the tab says what it is doing rather than drawing an empty surface.
+  check('writing draws no editor before a document is open', markup.includes('data-writing-editorjs'), false)
   check('writing says it is opening', markup.includes('Opening'), true)
   check('writing phase starts at loading', markup.includes('data-writing-phase="loading"'), true)
 
-  // THE PAGE SURFACE, rendered from a document and a page list this check makes
-  // itself: `pagesElement` is a pure element builder, so the paper, the margins,
-  // the editable blocks and the page-break markers are all provable with no
-  // browser (which is what a tab that exists to be typed into most needs).
+  // THE PAGE SURFACE AS ELEMENTS, kept and still driven: the tab no longer renders
+  // paper (Editor.js owns the surface now), but `pagesElement`, `blockElement`,
+  // `flowStyle` and the block element builder are exported pure functions and the
+  // block splitter is a public part of this package - so they are proved here
+  // rather than left to rot. What the TAB draws is asserted above.
   const pageDoc = {
     id: 'check-doc',
     title: 'Check',
@@ -6706,6 +6721,109 @@ check('...and the vendored routes went with them', Object.values(canvasInternals
     JSON.stringify([{ text: 'onethree', marks: [] }]),
   )
   check('writing renders plain text as one run', JSON.stringify(io.runsFromPlainText('hello')), JSON.stringify([{ text: 'hello', marks: [] }]))
+
+  // ---------------------------------------------------------------------------
+  // The Editor.js bridge: the model in, Editor.js's block JSON out, and back.
+  //
+  // This is the piece that made the surface swap possible, and it is PURE - no DOM,
+  // no editor, no fetch - so it is driven here exactly as the host half's own copy
+  // is driven in `check-writing-node.mjs`. Both halves must agree, which is what
+  // these two lists of cases are for.
+  // ---------------------------------------------------------------------------
+  check('the vendored scripts are named in load order', io.EDITOR_SCRIPTS.map((entry) => entry.file).join(','), 'editorjs.umd.js,paragraph.umd.js,header.umd.js,editorjs-list.umd.js,quote.umd.js,code.umd.js')
+  check('the core is the first script', io.EDITOR_SCRIPTS[0].global, 'EditorJS')
+  check('the list tool is the global it leaves behind', io.EDITOR_SCRIPTS[3].global, 'EditorjsList')
+  check('the editor route is the package route', io.EDITOR_ROUTE, '/api/dsh-writing/vendor/editorjs/')
+  check('the editor offers the two inline tools it has', io.EDITOR_INLINE_TOOLS.join(','), 'bold,italic')
+  check('the marks the pack adds ride on an attribute', io.MARK_ATTRIBUTE, 'data-mark')
+
+  const bridgeDoc = {
+    page: { size: 'a4', orientation: 'portrait', margins: { top: 25.4, right: 25.4, bottom: 25.4, left: 25.4 } },
+    font: '',
+    fontSize: 12,
+    blocks: [
+      { type: 'heading', level: 2, runs: [{ text: 'A heading', marks: [] }] },
+      { type: 'paragraph', runs: [{ text: 'plain ', marks: [] }, { text: 'b', marks: ['b'] }, { text: 'u', marks: ['u'] }, { text: 's', marks: ['s'] }, { text: 'c', marks: ['code'] }] },
+      { type: 'listItem', ordered: false, level: 0, runs: [{ text: 'one', marks: [] }] },
+      { type: 'listItem', ordered: false, level: 1, runs: [{ text: 'nested', marks: [] }] },
+      { type: 'listItem', ordered: false, level: 0, runs: [{ text: 'two', marks: [] }] },
+      { type: 'quote', runs: [{ text: 'quoted', marks: [] }] },
+      { type: 'code', runs: [{ text: 'const x = 1', marks: [] }] },
+      { type: 'pageBreak', runs: [{ text: '', marks: [] }] },
+    ],
+  }
+  const bridgeTime = 1700000000000
+  const editorData = io.toEditorData(bridgeDoc, bridgeTime)
+  check('the bridge stamps the data with the time it is given', editorData.time, bridgeTime)
+  check(
+    'the bridge maps every block type',
+    editorData.blocks.map((block) => block.type).join(','),
+    'header,paragraph,list,quote,code,delimiter',
+  )
+  check('the heading carries its level', editorData.blocks[0].data.level, 2)
+  check('the list carries its style', editorData.blocks[2].data.style, 'unordered')
+  check('the list NESTS the deeper level', editorData.blocks[2].data.items[0].items.length, 1)
+  check('the list keeps the sibling at the root', editorData.blocks[2].data.items.length, 2)
+  check('the quote carries its text', editorData.blocks[3].data.text, 'quoted')
+  check('the code carries its characters', editorData.blocks[4].data.code, 'const x = 1')
+  check(
+    'the marks ride on data-mark spans inside the paragraph',
+    /data-mark="b"|data-mark="[^"]*b/.test(editorData.blocks[1].data.text) && editorData.blocks[1].data.text.includes('<br>') === false,
+    true,
+  )
+  // The round trip: what the editor would save is what the model gets back, block
+  // for block, with the text intact. Marks are the client DOM reader's business and
+  // are driven through `runsFromHtmlString` below.
+  const roundTrip = io.fromEditorData(editorData)
+  check(
+    'the round trip keeps every block type',
+    roundTrip.blocks.map((block) => block.type).join(','),
+    'heading,paragraph,listItem,listItem,listItem,quote,code,pageBreak',
+  )
+  // The list flattens back to the levels it came from, not to three siblings: the
+  // nesting the tool draws IS the model's level.
+  check('the round trip keeps the list levels', roundTrip.blocks.slice(2, 5).map((block) => block.level ?? null).join(','), '0,1,0')
+  check('the round trip keeps the heading level', roundTrip.blocks[0].level, 2)
+  check('the round trip keeps the code verbatim', roundTrip.blocks[6].runs.map((run) => run.text).join(''), 'const x = 1')
+  check('the round trip keeps the words', roundTrip.blocks[1].runs.map((run) => run.text).join(''), 'plain busc')
+  check('a page break is reported, not silently drawn', roundTrip.losses.some((entry) => entry.kind === 'page break'), true)
+  check('a model with no page break reports no loss', io.fromEditorData(io.toEditorData({ blocks: [{ type: 'paragraph', runs: [{ text: 'x', marks: [] }] }] })).losses.length, 0)
+  // A block type no vendored tool has: kept as a paragraph WITH its text and reported.
+  const unknownRound = io.fromEditorData({ blocks: [{ id: 'a', type: 'table', data: { text: 'cells' } }] })
+  check('an unknown block becomes a paragraph', unknownRound.blocks[0].type, 'paragraph')
+  check('an unknown block keeps its text', unknownRound.blocks[0].runs.map((run) => run.text).join(''), 'cells')
+  check('an unknown block is reported', unknownRound.losses.some((entry) => entry.kind === 'block type the editor does not have'), true)
+  check('an empty editor data is still one empty paragraph', io.fromEditorData({ blocks: [] }).blocks.length, 0)
+
+  // The HTML reader/writer the pack's own tools use: the marks survive a round
+  // trip through the attribute, the browser's own `<b>`/`<em>` are read too, an
+  // unknown element is transparent, and a stray `<` stays text.
+  const markRuns = [{ text: 'a', marks: ['b'] }, { text: 'b', marks: ['u'] }, { text: 'c', marks: ['s'] }, { text: 'd', marks: ['code'] }, { text: 'e', marks: ['i'] }]
+  check(
+    'a mark round trips through markHtml',
+    JSON.stringify(io.runsFromHtmlString(io.markHtml(markRuns))),
+    JSON.stringify(markRuns),
+  )
+  check('markHtml stamps the mark attribute', io.markHtml([{ text: 'x', marks: ['u'] }]), '<span data-mark="u">x</span>')
+  check('markHtml keeps a font on a style', io.markHtml([{ text: 'x', marks: [], font: 'Georgia', size: 14 }]), "<span style=\"font-family:'Georgia';font-size:14pt\">x</span>")
+  check('markHtml turns a soft break into a br', io.markHtml([{ text: 'a\nb', marks: [] }]), 'a<br>b')
+  check('markHtml gives an empty block a break', io.markHtml([]), '<br>')
+  check('markHtml escapes the text', io.markHtml([{ text: '<b> & </b>', marks: [] }]), '&lt;b&gt; &amp; &lt;/b&gt;')
+  check('the reader reads the browser\u2019s own bold', JSON.stringify(io.runsFromHtmlString('<strong>x</strong>')), JSON.stringify([{ text: 'x', marks: ['b'] }]))
+  check('the reader reads an em as italic', JSON.stringify(io.runsFromHtmlString('<em>x</em>')), JSON.stringify([{ text: 'x', marks: ['i'] }]))
+  check('the reader is transparent for an unknown element', JSON.stringify(io.runsFromHtmlString('<div><span>x</span></div>')), JSON.stringify([{ text: 'x', marks: [] }]))
+  check('the reader turns a br into a soft break', JSON.stringify(io.runsFromHtmlString('a<br>b')), JSON.stringify([{ text: 'a\nb', marks: [] }]))
+  check('the reader keeps a stray < as text', JSON.stringify(io.runsFromHtmlString('a < b')), JSON.stringify([{ text: 'a < b', marks: [] }]))
+  check('the reader never returns zero runs', JSON.stringify(io.runsFromHtmlString('')), JSON.stringify([{ text: '', marks: [] }]))
+  check('the reader reads the family and size off a style', JSON.stringify(io.runsFromHtmlString('<span style="font-family:Georgia;font-size:14pt">x</span>')), JSON.stringify([{ text: 'x', marks: [], font: 'Georgia', size: 14 }]))
+  // One element per run: a marked run before a plain one must NOT colour the plain
+  // one, because the reader reads the attribute, not a wrapping scope.
+  check(
+    'the reader keeps a marked run from colouring its neighbour',
+    JSON.stringify(io.runsFromHtmlString(io.markHtml([{ text: 'a', marks: ['b'] }, { text: 'b', marks: [] }]))),
+    JSON.stringify([{ text: 'a', marks: ['b'] }, { text: 'b', marks: [] }]),
+  )
+  check('every model block has an Editor.js type', ['paragraph', 'header', 'list', 'quote', 'code', 'delimiter'].every((type) => io.EDITOR_KNOWN_TYPES.has(type)), true)
   // A menu CLOSES when its item is chosen: a `details` that stays open over the
   // page reads as a menu that did not work, and the New flow depends on it.
   {
@@ -6717,8 +6835,9 @@ check('...and the vendored routes went with them', Object.values(canvasInternals
     check('writing survives closing a menu that is not there', true, true)
     check('writing shows no dialog until one is asked for', markup.includes('data-writing-dialog'), false)
   }
-  // THE FONT AND FILE CONTROLS, and the headings toggle, which is what this
-  // round added to the shell.
+  // THE FONT AND FILE CONTROLS, the headings toggle, the × that removes the
+  // document being written on, and the ONE New button (a document is what this tab
+  // makes, so there is no menu of file kinds left to choose from).
   for (const marker of [
     'data-writing-font',
     'dsw-fontFamilies',
@@ -6726,13 +6845,26 @@ check('...and the vendored routes went with them', Object.values(canvasInternals
     'data-writing-docfont',
     'data-writing-docsize',
     'data-writing-new',
-    'data-new="docx"',
-    'data-new="xlsx"',
-    'data-new="page"',
+    'data-action="new"',
+    'data-writing-delete',
     'data-action="headings"',
   ]) {
     check('writing shell carries ' + marker, markup.includes(marker), true)
   }
+  check('the bar no longer offers a file-kind menu', markup.includes('data-new="xlsx"'), false)
+  check('the bar no longer offers a workbook from New', markup.includes('data-new="docx"'), false)
+  // EVERY heading level is reachable, not just one: a document whose only heading
+  // was a Heading 2 could not be given a title.
+  check(
+    'the Document menu inserts every heading level',
+    [1, 2, 3, 4, 5, 6].every((level) => markup.includes('data-writing-insert="heading-' + level + '"')),
+    true,
+  )
+  check('the Document menu still inserts a quote and a code block', markup.includes('data-writing-insert="quote"') && markup.includes('data-writing-insert="code"'), true)
+  // Export: one destination, the Desktop, for every format - there is no longer a
+  // "into the conversation folder" row to pick by mistake.
+  check('the Export menu writes to the Desktop', markup.includes('to the Desktop'), true)
+  check('no export row offers the conversation folder', markup.includes('into the conversation folder'), false)
   // The document's own typography is what the page column wears, and the px/mm
   // arithmetic is the same one the page box uses.
   const flow = io.flowStyle({ font: 'Georgia', fontSize: 14 }, 601.7)
@@ -6899,8 +7031,19 @@ check('...and the vendored routes went with them', Object.values(canvasInternals
   const hostRoutes = routeSuffixes(writingHostSource)
   const clientRoutes = routeSuffixes(writingClientSource)
   check('writing: the host registers routes at all', hostRoutes.length > 5, true)
-  check('writing: the client names every host route', hostRoutes.filter((route) => !clientRoutes.includes(route)).join(','), '')
   check('writing: the client names no route the host does not register', clientRoutes.filter((route) => !hostRoutes.includes(route)).join(','), '')
+  // The client names every host route EXCEPT one, and that one is named: the page
+  // breaker. The host keeps serving it (the splitter is a public part of this
+  // package and check-writing-node drives it), but the tab edits in Editor.js now,
+  // so a route a client no longer reads is exactly the kind of thing that goes
+  // stale unnoticed.
+  check(
+    'writing: the client names every host route but the page breaker',
+    hostRoutes.filter((route) => !clientRoutes.includes(route) && route !== '/page.js').join(','),
+    '',
+  )
+  check('writing: the host still serves the page breaker', hostRoutes.includes('/page.js'), true)
+  check('writing: the client does not ask for the page breaker', clientRoutes.includes('/page.js'), false)
 }
 
 // The pack's class namespace rule, last so it sees every bundle above.

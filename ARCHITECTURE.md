@@ -52,7 +52,7 @@ disable/replace a core row **in its own layer** — a later layer wins per row.
 | `dsh-diagrams` | `diagrams` | Mermaid + TikZ surfaces and the six `diagram_*` tools, validated on the host |
 | `dsh-pdf` | `pdf` | PDF reader tab + `pdf_info` / `pdf_read` / `pdf_find` / `pdf_render` / `pdf_scan` over vendored pdf.js |
 | `dsh-canvas` | `canvas` | Canvas tab: a JSON design language, a browser painter, PNG export |
-| `dsh-writing` | `writing` | Writing tab (a page) + right-bar panes (a `.xlsx` grid, a Headings navigator, an editable `.docx`): documents in its own store, real files on disk, and three hand-written codecs (`.docx`, `.xlsx`, the machine's fonts) — with the harness's own LibreOffice as the proof renderer and the formula engine (`Proof` writes a file and hands it to the shipped office preview; nothing here renders or computes) |
+| `dsh-writing` | `writing` | Writing tab (a document) + right-bar panes (a `.xlsx` grid, a Headings navigator, an editable `.docx`) + the three `writing_*` tools the agent writes documents with + the `research` skill: documents in its own store, real files on disk, and three hand-written codecs (`.docx`, `.xlsx`, the machine's fonts) — with the harness's own LibreOffice as the proof renderer and the formula engine (`Proof` writes a file and hands it to the shipped office preview; nothing here renders or computes) |
 | `dsh-browser` | `browser` | web surface: the host fetches and renders a page in a disposable sandboxed browser (**currently disabled by the master**) |
 | `dsh-themes` | `themes` | extra palettes (Nord, Monokai, Hacker, Cyber), header controls, branding, account-menu trimming |
 | `dsh-cmdbar` | `cmdbar` | the command bar: a read-only transcript of the agent's own commands |
