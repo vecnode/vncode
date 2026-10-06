@@ -29,7 +29,7 @@ window.__ModuleLoader__.load({
     const React = require('react')
     const jsxRuntime = require('react/jsx-runtime')
 
-    exports.PLUGIN_VERSION = '0.1.0-alpha.1'
+    exports.PLUGIN_VERSION = '0.1.0-alpha.2'
 
     const TYPE_ID = 'dsh-supercollider'
     const TAB_SLOT = 'sidebar.right.pane.tab'

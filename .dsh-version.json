@@ -29,7 +29,7 @@
       "vendors": [
         "@deepseek-ai/dsh-client-ui-sidebar-right"
       ],
-      "vendoredPatches": 11,
+      "vendoredPatches": 14,
       "role": "Right bar: the tab strip, docking panel, expand button, Start page and the `sidebarRightTabs` / `sidebarRight` services every tab type registers into. A GENERATED fork of the shipped bar whose layer disables `ui-sidebar-right` / `ui-sidebar-files`, rendering the kit's recursive `DockSurface` through its own `vendor/dock-tree.js`. See packages/dsh-rightbar/README.md."
     },
     "dsh-rightbar-files": {
@@ -116,12 +116,12 @@
       ]
     },
     "dsh-supercollider": {
-      "version": "0.1.0-alpha.1",
+      "version": "0.1.0-alpha.2",
       "rows": [
         "supercollider"
       ],
       "rowOverrides": [],
-      "role": "SuperCollider the agent can play (host half plus a deliberately small console tab): ten `sc_*` tools over ONE long-lived sclang session and a hand-written OSC client to scsynth, the installed .schelp reference indexed for sc_help, the .scd file workflow, and five bundled skills that teach the language, SynthDefs and live coding. Zero npm dependencies and no MCP server; `mcp/stdio.js` is the same engine over stdio for a client without the harness. See packages/dsh-supercollider/README.md.",
+      "role": "SuperCollider the agent can play (host half plus a deliberately small console tab): eleven `sc_*` tools over ONE long-lived sclang session and a hand-written OSC client to scsynth, the installed .schelp reference indexed for sc_help, the .scd file workflow, and five bundled skills that teach the language, SynthDefs and live coding. Zero npm dependencies and no MCP server; `mcp/stdio.js` is the same engine over stdio for a client without the harness. See packages/dsh-supercollider/README.md.",
       "uses": [
         "@deepseek-ai/dsh-client-ui-tool (the tool cards, resolved lazily)",
         "the harness's own `ctx.tools`, `ctx.skills` and `connection.fetch` registries",

@@ -39,6 +39,13 @@ function skip(label, why) {
 
 const load = async (name) => import(pathToFileURL(path.join(engine, name)).href)
 
+/** Two channels as the interleaved floats `/b_setn` returns. */
+function interleave(left, right) {
+  const out = []
+  for (let index = 0; index < left.length; index += 1) out.push(left[index], right[index])
+  return out
+}
+
 // --------------------------------------------------------------- OSC wire format
 const osc = await load('osc.js')
 
@@ -373,6 +380,54 @@ const sclang = await load('sclang.js')
   check('parse reports an error', sclang.parseReply(err, '8').state, 'error')
   check('parse returns the error text', sclang.parseReply(err, '8').payload, 'ERROR: Variable not defined')
 
+  // --- the submission path that fixed `sc_load` -----------------------------
+  //
+  // The bug this pins: a multi-line `.scd` used to be collapsed into ONE line,
+  // which moved every `var` off the top of its block and produced
+  // `syntax error, unexpected VAR` — or an error report whose text was the
+  // generated wrapper itself. Code that cannot survive collapsing must go to a
+  // file instead, and `interpret` it by path.
+  check('one line of code can stay inline', sclang.needsTempFile('1 + 1'), false)
+  check('a multi-line submission needs a file', sclang.needsTempFile('(\nvar a = 1;\na;\n)'), true)
+  check('a comment needs a file', sclang.needsTempFile('1 + 1 // two'), true)
+  check('a block comment needs a file', sclang.needsTempFile('1 /*x*/ + 1'), true)
+  check('a long submission needs a file', sclang.needsTempFile('1 + ' + '1 + '.repeat(900) + '1'), true)
+  // A URL inside a string is not a comment, and must not push code to a file.
+  check('a // inside a string is not a comment', sclang.needsTempFile('"http://x"'), false)
+
+  const native = sclang.buildSubmission({ id: '9', code: 'ignored', nativeFile: 'C:\\a b\\x.scd' })
+  check('a file submission reads the file', native.includes('File.use('), true)
+  check('a file submission escapes the path', native.includes('C:\\\\a b\\\\x.scd'), true)
+  check('a file submission interprets the text', native.includes('readAllString.interpret'), true)
+  check('a file submission is one line', native.includes('\n'), false)
+  check('a file submission posts an OK reply', native.includes('<RI:9:OK>'), true)
+  // The wrapper must declare no `var` of its own inside a branch: sclang only
+  // allows a `var` as the first statement of its own block, and the generated
+  // code's branches are not always function bodies in the places that mattered.
+  check('a file submission declares no var', /\bvar\b/.test(native), false)
+  const inlineSub = sclang.buildSubmission({ id: '10', code: '1 + 1' })
+  check('an inline submission carries the value in ~dshResult', inlineSub.includes('~dshResult'), true)
+  check('an inline submission is one line', inlineSub.includes('\n'), false)
+
+  // --- reading a real interpreter error out of a transcript -----------------
+  //
+  // `String:interpret` does not raise: it prints the reason and returns nil, so a
+  // load of a broken file would otherwise be reported as a success with no value.
+  const realError = [
+    'ERROR: syntax error, unexpected VAR, expecting }',
+    '  in interpreted text',
+    '  line 5 char 4:',
+    '',
+    '\tvar b = 2;',
+    '\t^^^',
+    '-----------------------------------',
+  ].join('\n')
+  const reported = sclang.extractInterpreterError(realError)
+  check('an interpreter error is found', reported !== null, true)
+  check('an interpreter error names the line', reported.line, 5)
+  check('an interpreter error carries the reason', reported.message.includes('unexpected VAR'), true)
+  check('a clean transcript reports no error', sclang.extractInterpreterError('#LINE 1\n-> 2\nsc3> '), null)
+
   const fileReply = '-> <RI:9:FILE>C:\\tmp\\a.scsyndef:420</RI>\nsc3> '
   const fileParsed = sclang.parseReply(fileReply, '9')
   check('parse reports a file hand-off', fileParsed.state, 'file')
@@ -464,6 +519,131 @@ const project = await load('project.js')
   } finally {
     await fsp.rm(root, { recursive: true, force: true })
   }
+}
+
+// --------------------------------------------------------------- measuring a sound
+//
+// The measurement half of the engine is pure arithmetic on the samples the server
+// returned, so it is worth pinning exactly. The bug it exists to prevent is a tool
+// that reports "SILENT" for a sound that is playing, and a model that is heard as
+// noise because it clips.
+{
+  const { analyse, amplitude, spectrum, verdictFor, dominantPeaks } = await load('analysis.js')
+
+  const sampleRate = 48_000
+  const frames = sampleRate
+  const tone = Float64Array.from({ length: frames }, (_, i) => 0.4 * Math.sin((2 * Math.PI * 220 * i) / sampleRate))
+  const noise = Float64Array.from({ length: frames }, () => (Math.random() * 2 - 1) * 0.4)
+  const silence = new Float64Array(frames)
+
+  const tonal = amplitude(tone)
+  check('a 0.4 sine peaks at 0.4', Math.round(tonal.peak * 1000) / 1000, 0.4)
+  check('a 0.4 sine has the expected rms', Math.round(tonal.rms * 1000) / 1000, 0.283)
+  check('a clean sine does not clip', tonal.clipped, 0)
+  check('silence is reported as silent', analyse(interleave(silence, silence), { channels: 2, sampleRate }).quiet, true)
+
+  const loud = amplitude(Float64Array.from(tone, (v) => v * 4))
+  check('a hot signal counts clipped samples', loud.clipped > 0, true)
+  check('a hot signal is flagged as clipping', analyse(interleave(Float64Array.from(tone, (v) => v * 4), silence), { channels: 2, sampleRate }).clipping, true)
+
+  // The tonality test is the one that separates a gong from a noise burst.
+  const tonalSpectrum = spectrum(tone, { sampleRate })
+  const noiseSpectrum = spectrum(noise, { sampleRate })
+  check('a sine is strongly tonal', tonalSpectrum.flatness < 0.001, true)
+  check('white noise is not tonal', noiseSpectrum.flatness > 0.2, true)
+  check('the verdict for a sine says tonal', /tonal/.test(tonalSpectrum.verdict), true)
+  check('the verdict for noise says noise', /noise/.test(noiseSpectrum.verdict), true)
+  check('a 220 Hz sine is found at 220 Hz', Math.abs(tonalSpectrum.peaks[0].hz - 220) < 6, true)
+  check('the flatness thresholds are named', verdictFor(0.5), 'noise (no discernible pitch)')
+
+  // The FFT's own numerical noise in empty bins must not be reported as partials:
+  // measured, a synthetic gong once reported 23906.3 Hz beside its 64.5 Hz root.
+  const gongish = Float64Array.from({ length: frames }, (_, i) => {
+    const t = i / sampleRate
+    return 0.3 * Math.exp(-t / 2) * (Math.sin((2 * Math.PI * 62 * i) / sampleRate) + 0.5 * Math.sin((2 * Math.PI * 91.8 * i) / sampleRate))
+  })
+  const gongPeaks = spectrum(gongish, { sampleRate }).peaks
+  check('a modal signal reports a few partials, not noise', gongPeaks.length <= 4, true)
+  check('no partial is reported above 20 kHz', gongPeaks.every((peak) => peak.hz < 20_000), true)
+
+  // A multi-channel capture is split, not summed: a signal in one channel only
+  // must show up in that channel and not the other.
+  const oneSided = analyse(interleave(tone, silence), { channels: 2, sampleRate })
+  check('channel 0 reports the signal', oneSided.perChannel[0].rms > 0.2, true)
+  check('channel 1 reports silence', oneSided.perChannel[1].rms, 0)
+}
+
+// --------------------------------------------------------------- the measurement tap
+//
+// `sc_capture` measures a def by rewriting its own `Out.ar` so the emitted signal
+// is recorded inside the node that makes it. That rewrite is pure text handling,
+// and every wrong version of it compiled — so it is pinned here.
+{
+  // `tools.js` lives one level up from the engine, and its tap transform is the
+  // part worth pinning: it is pure text handling whose every wrong version still
+  // compiled.
+  const tools = await import(pathToFileURL(path.join(repo, 'lib', 'tools.js')).href)
+
+  check('a def name is read from a backslash literal', tools.declaredSynthDefName('SynthDef(\\bell, { })'), 'bell')
+  check('a def name is read from a single-quoted literal', tools.declaredSynthDefName("SynthDef('bell', { })"), 'bell')
+  check('a def name is read from a double-quoted literal', tools.declaredSynthDefName('SynthDef("bell", { })'), 'bell')
+  check('a name with underscores survives', tools.declaredSynthDefName('SynthDef(\\name_1x, { })'), 'name_1x')
+  check('a source with no SynthDef has no name', tools.declaredSynthDefName('x = 1'), null)
+
+  const simple = 'SynthDef(\\a, { |out = 0| Out.ar(out, SinOsc.ar(440) * 0.1) })'
+  const tapped = tools.tapSynthDefSource(simple, 'a_measured')
+  check('a tap is produced', typeof tapped === 'string', true)
+  check('a tap registers the name it was given', tapped.includes('SynthDef(\\a_measured,'), true)
+  check('a tap keeps the caller arguments', tapped.includes('|out = 0, recBuf = 0, recSeconds = 3|'), true)
+  // The measurement mechanism itself. `RecordBuf.ar(Out.ar(...), buf)` was tried
+  // and captured exact silence: `Out.ar` expands, so `RecordBuf.ar` was
+  // instantiated once per channel. The recorded signal must be handed DIRECTLY to
+  // `RecordBuf.ar`, and a mono signal must be duplicated to match the stereo
+  // buffer, or the capture is silence.
+  check('a tap records the emitted signal directly', tapped.includes('RecordBuf.ar('), true)
+  check('a tap routes the record buffer through a function', tapped.includes('{ |dshOut|'), true)
+  check('a tap forces the recorded signal to two channels', tapped.includes('dshSig.numChannels'), true)
+  check('a tap frees its own node', tapped.includes('doneAction: 2'), true)
+  check('a tap balanced its parentheses', (tapped.match(/\(/g) ?? []).length === (tapped.match(/\)/g) ?? []).length, true)
+
+  // A body that declares its own `var` must still work: the caller's text is
+  // wrapped in a function precisely so its `var` keeps its legal position.
+  const withVar = 'SynthDef(\\b, { |out = 0| var s = Saw.ar(110) * 0.2; Out.ar(out, s) })'
+  const tappedVar = tools.tapSynthDefSource(withVar, 'b_measured')
+  check('a tap keeps a user var inside a function', tappedVar.includes('var s = Saw.ar(110)'), true)
+  check('a tap leaves the user var inside braces', /\{\s*\|dshOut\|\s*var s =/.test(tappedVar), true)
+
+  // Two emissions and a nested bus expression both have to survive.
+  const twoOuts = 'SynthDef(\\c, { |out = 0| var s = Saw.ar(110) * 0.1; Out.ar(out, s); Out.ar(out + 2, s) })'
+  const tappedTwo = tools.tapSynthDefSource(twoOuts, 'c_measured')
+  check('every Out.ar is tapped', (tappedTwo.match(/Out\.ar\(out/g) ?? []).length, 2)
+  check('each emission got its own RecordBuf', (tappedTwo.match(/RecordBuf\.ar\(/g) ?? []).length >= 2, true)
+  check('a second Out.ar keeps its own bus', tappedTwo.includes('Out.ar(out + 2,'), true)
+
+  const nested = 'SynthDef(\\d, { |out = 0, pan = 0| Out.ar(out, Pan2.ar(Saw.ar(110) * 0.1, pan)) })'
+  const tappedNested = tools.tapSynthDefSource(nested, 'd_measured')
+  check('a nested call is not mistaken for the bus', tappedNested.includes('Out.ar(out, { |dshSig|'), true)
+  check('the nested call is recorded whole', tappedNested.includes('.value(Pan2.ar(Saw.ar(110) * 0.1, pan))'), true)
+
+  // A def with no output cannot be measured, and must be refused rather than
+  // silently reported as silent.
+  check('a def with no Out.ar is refused', tools.tapSynthDefSource('SynthDef(\\e, { |freq = 100| SinOsc.ar(freq) })', 'e_m'), null)
+  check('a non-SynthDef is refused', tools.tapSynthDefSource('x = 1', 'x_m'), null)
+
+  // A single-argument `Out.ar(sig)` is a legal MONO emission to bus 0, and it has
+  // no comma to split on. The feedback example writes exactly that, so refusing it
+  // would make a whole category of instrument unmeasurable.
+  const monoTap = tools.tapSynthDefSource('SynthDef(\\f, { |out = 0| Out.ar(SinOsc.ar(220) * 0.2) })', 'f_m')
+  check('a mono Out.ar is tapped', typeof monoTap === 'string', true)
+  check('a mono Out.ar gets bus 0', String(monoTap).includes('Out.ar(0,'), true)
+
+  // Prose in a comment must not break the scan. sclang's `'x'` is a string, so
+  // "a gong's modes" opens one that never closes — measured, that single
+  // apostrophe made this transform refuse a perfectly balanced SynthDef.
+  const commented = 'SynthDef(\\g, { |out = 0|\n\t// a gong\'s modes are not harmonic\n\tOut.ar(out, SinOsc.ar(220) * 0.2)\n})'
+  const commentTap = tools.tapSynthDefSource(commented, 'g_m')
+  check('an apostrophe in a comment does not break the tap', typeof commentTap === 'string', true)
+  check('the comment survives the rewrite', String(commentTap).includes("a gong's modes"), true)
 }
 
 // --------------------------------------------------------------- a live install, when there is one

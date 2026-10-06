@@ -253,20 +253,47 @@ export class SupercolliderSession {
     await ensureDirs(this.home, ['synthdefs'])
     const digest = createHash('sha256').update(String(options.name) + '\u0000' + String(options.source)).digest('hex').slice(0, 16)
     const file = path.join(synthDefDir(this.home), options.name + '-' + digest + '.scsyndef')
-    const code = [
-      'var d = ' + String(options.source).trim() + ';',
-      'if (d.isNil) { "the SynthDef could not be built (the source evaluated to nil)" } {',
-      '  var f = File.open("' + file.replace(/\\/g, '\\\\') + '", "wb");',
-      '  if (f.isNil) { "could not open the .scsyndef file for writing" } {',
-      '    f.write(d.asBytes); f.close;',
-      '    "wrote the .scsyndef"',
-      '  }',
-      '};',
-    ].join(' ')
+    // ONE expression. Every `var` in generated code is a hazard: sclang allows a
+    // `var` only at the top of a function body, so `var` inside a `try` branch is
+    // `syntax error, unexpected VAR` — which is how every SynthDef compile in this
+    // engine used to fail, invisibly, with the error handler's own source text as
+    // the "reason". `String:interpret` on this file is what writes the bytes.
+    const literal = file.replace(/\\/g, '\\\\')
+    const code =
+      '(' +
+      ' File.use("' + literal + '", "wb", { |f|' +
+      '   f.write((' + String(options.source).trim() + ').asBytes);' +
+      '   "wrote the .scsyndef"' +
+      ' }).value' +
+      ' )'
     const started = Date.now()
-    const result = await this.sclang.evaluate({ code, timeoutMs: options.timeoutMs ?? 60_000, mode: 'inline' })
+    let result = await this.sclang.evaluate({ code, timeoutMs: options.timeoutMs ?? 60_000, mode: 'inline' })
+    // A `nil` here means `File.use` never produced its String. Measured as an
+    // occasional, non-deterministic failure on a long-lived session: the same
+    // source compiles cleanly in a fresh interpreter, so the retry is the right
+    // answer rather than a different code path. Without it, an instrument that
+    // compiles fine is reported as a compile error — which is exactly how a
+    // measurement of a working gong came back as "would not compile".
+    if (result.ok && String(result.text ?? '').trim() === 'nil') {
+      await sleep(80)
+      result = await this.sclang.evaluate({ code, timeoutMs: options.timeoutMs ?? 60_000, mode: 'inline' })
+    }
     if (!result.ok) {
       return { ok: false, name: options.name, file: null, bytes: 0, error: result.error, detail: result.text, ms: Date.now() - started }
+    }
+    // The evaluation returning `nil` where a String was expected means the
+    // expression never produced a value: a source that evaluated to nil, or a
+    // def the compiler refused. Either way there is nothing to load.
+    if (String(result.text ?? '').trim() === 'nil') {
+      return {
+        ok: false,
+        name: options.name,
+        file: null,
+        bytes: 0,
+        error: 'the SynthDef source evaluated to nil, so there was nothing to write (check the SynthDef expression)',
+        detail: result.text,
+        ms: Date.now() - started,
+      }
     }
     let bytes = 0
     try {
@@ -279,6 +306,19 @@ export class SupercolliderSession {
         file: null,
         bytes: 0,
         error: 'the SynthDef compiled but no file was written',
+        detail: result.text,
+        ms: Date.now() - started,
+      }
+    }
+    // sclang writes any compile failure to its stderr/transcript and still exits
+    // cleanly, so an empty or tiny file is the real signal that the def is junk.
+    if (bytes < 64) {
+      return {
+        ok: false,
+        name: options.name,
+        file: null,
+        bytes,
+        error: 'the SynthDef produced only ' + bytes + ' bytes, so it did not compile',
         detail: result.text,
         ms: Date.now() - started,
       }
@@ -300,15 +340,28 @@ export class SupercolliderSession {
   async loadSynthDef(options) {
     const port = options.port
     if (!Number.isInteger(port)) return { ok: false, loaded: false, already: false, verified: false, error: 'no server port was resolved' }
-    const names = this.loaded.get(port) ?? new Set()
-    if (!options.force && names.has(options.name)) {
+    /** name -> the content that is resident on that server, per port. */
+    const resident = this.loaded.get(port) ?? new Map()
+    // Keyed by the def's CONTENT. Keying by name alone was a real bug: the same
+    // name with a new body was reported "already loaded", the server kept the OLD
+    // def, and every measurement after the first one measured the wrong sound.
+    //
+    // The content is `source` when the caller has it, and the file path otherwise
+    // — and the file path is a weaker key, because the engine writes one file per
+    // (name, source) digest but the SAME file name is reused when only the caller
+    // changed. So `stale` says when the caller told us the file was rewritten and
+    // we cannot tell whether the server has the new bytes.
+    const content = options.source !== undefined && options.source !== null ? String(options.source) : null
+    const key = content ?? (options.file !== undefined && options.file !== null ? String(options.file) : String(options.name))
+    const stale = content === null && options.refreshed === true
+    if (!options.force && !stale && resident.get(String(options.name)) === key) {
       const status = await this.scsynth.status({ port })
       // A cached "loaded" is only believed when the server still has at least one
       // def. After a reboot the count is 0 and the cache is re-sent.
       if (status.up && (status.metrics?.synthDefCount ?? 0) > 0) {
         return { ok: true, loaded: false, already: true, verified: true, error: null }
       }
-      names.delete(options.name)
+      resident.delete(String(options.name))
     }
     const before = (await this.scsynth.status({ port })).metrics?.synthDefCount ?? null
     const sent = await this.scsynth.loadSynthDef({ port, file: options.file })
@@ -322,8 +375,8 @@ export class SupercolliderSession {
       after = status.metrics?.synthDefCount ?? after
       if (before === null || after === null || after > before) break
     }
-    names.add(options.name)
-    this.loaded.set(port, names)
+    resident.set(String(options.name), key)
+    this.loaded.set(port, resident)
     const verified = before === null || after === null ? sent.acknowledged === true : after > before
     return {
       ok: true,

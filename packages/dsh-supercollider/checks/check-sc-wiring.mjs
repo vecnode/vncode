@@ -220,11 +220,11 @@ const ctx = {
 
 index.apply(ctx)
 
-check('ten tools registered', registered.tools.length, 10)
+check('eleven tools registered', registered.tools.length, 11)
 check(
-  'the tool names are the documented ten',
+  'the tool names are the documented eleven',
   JSON.stringify(registered.tools.map((tool) => tool.name)),
-  JSON.stringify(['sc_status', 'sc_help', 'sc_check', 'sc_exec', 'sc_play', 'sc_project', 'sc_load', 'sc_synthdef', 'sc_nodes', 'sc_server']),
+  JSON.stringify(['sc_status', 'sc_help', 'sc_check', 'sc_exec', 'sc_play', 'sc_capture', 'sc_project', 'sc_load', 'sc_synthdef', 'sc_nodes', 'sc_server']),
 )
 check('three routes registered', registered.routes.length, 3)
 check(
@@ -258,6 +258,16 @@ for (const tool of registered.tools) {
 }
 check('every tool satisfies the tool contract', JSON.stringify(problems), JSON.stringify([]))
 if (problems.length > 0) for (const problem of problems) console.log('     ' + problem)
+
+// The example library is reached THROUGH a tool, so the action has to be
+// declared or the catalogue is unreachable however good the files are.
+{
+  const project = registered.tools.find((tool) => tool.name === 'sc_project')
+  const actions = project?.parameters?.properties?.action?.enum ?? []
+  check('sc_project offers the examples action', actions.includes('examples'), true)
+  check('sc_project still offers its file actions', ['list', 'read', 'write', 'send'].every((entry) => actions.includes(entry)), true)
+  check('the examples action is documented', /examples/.test(String(project?.description ?? '')), true)
+}
 
 // ---------------------------------------------------------------- done
 console.log('')

@@ -9,8 +9,9 @@
  *
  * Why it exists at all: the DSH plugin is the first-class target, but the SAME
  * engine (install discovery, the live `sclang` session, the OSC client, the
- * `.schelp` index) is what an MCP client wants. Claude Code and Codex can have
- * the ten tools without a second implementation and without the harness.
+ * `.schelp` index, the example library) is what an MCP client wants. Claude Code
+ * and Codex can have the eleven tools without a second implementation and without
+ * the harness.
  *
  *     node plugin/mcp/stdio.js
  *
@@ -30,11 +31,13 @@ import { buildTools, TOOL_NAMES } from '../lib/tools.js'
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
 
 /** The version this server reports. It must equal package.json's. */
-const SERVER_VERSION = '0.1.0-alpha.1'
+const SERVER_VERSION = '0.1.0-alpha.2'
 
 /** The instructions a client may show the model. */
 const INSTRUCTIONS = [
-  'SuperCollider control. Call sc_status first to learn what is installed and what is running, then sc_play to check the audio path, then sc_synthdef to define an instrument and sc_nodes to play it.',
+  'SuperCollider control. Call sc_status first to learn what is installed and what is running, then sc_play to check the audio path.',
+  'Before writing an instrument from nothing, call sc_project with action=examples: this package ships sixteen playable instruments (a modal gong, an FM bell, a plucked string, drum voices, drones, granular and feedback textures, a theremin) and action=examples file="3" loads one into the live session.',
+  'After building any sound, call sc_capture on it: it plays the def, records its own output and reports peak, RMS, clipping, tonality and the strongest partials, so "it sounds like noise" becomes a number you can act on.',
   'sc_exec runs code in a session that stays alive: everything it defines is still there on the next call, which is what makes live editing possible.',
   'sc_help searches the SuperCollider reference installed on this machine - read it before naming a UGen or an argument you are not certain about.',
 ].join(' ')

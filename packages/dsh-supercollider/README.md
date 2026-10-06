@@ -1,17 +1,20 @@
 # dsh-supercollider (alpha.1)
 
-**SuperCollider the agent can actually play, and five skills that teach it the language.**
+**SuperCollider the agent can actually play: eleven tools that make, MEASURE and
+rewrite sound, sixteen instruments to start from, and five skills that teach it the
+language.**
 
 SuperCollider is a language, a server and a reference, and an agent that only
 knows about DSP gets all three subtly wrong. This package gives it the three
 things that matter: **one live `sclang` session** that keeps its state between
 calls, **raw OSC control** of the audio server, and **the installed `.schelp`
-reference** to read before it guesses.
+reference** to read before it guesses — plus the loop that closes the gap between
+"a node is playing" and "it sounds like a gong".
 
-It is one row (`supercollider`) with ten tools, five skills, three host routes
-and one small console tab. Everything below the tools is in `lib/engine/`, which
-knows nothing about the harness — that is what lets `mcp/stdio.js` drive the same
-engine for a client that has no harness at all.
+It is one row (`supercollider`) with eleven tools, five skills, sixteen example
+instruments, three host routes and one small console tab. Everything below the
+tools is in `lib/engine/`, which knows nothing about the harness — that is what
+lets `mcp/stdio.js` drive the same engine for a client that has no harness at all.
 
 ## What it adds
 
@@ -33,15 +36,19 @@ engine for a client that has no harness at all.
   where the audio device and every `FAILURE IN SERVER` are printed), and never
   kills a server it did not start. A port is believed only after it answered
   `/status` — never because a command line mentioned it.
-- **Ten tools by intent, not by mechanism.** `sc_status`, `sc_help`, `sc_check`,
-  `sc_exec`, `sc_play`, `sc_project`, `sc_load`, `sc_synthdef`, `sc_nodes`,
-  `sc_server`. The old surface had six near-synonyms for "what is running".
+- **Eleven tools by intent, not by mechanism.** `sc_status`, `sc_help`, `sc_check`,
+  `sc_exec`, `sc_play`, `sc_capture`, `sc_project`, `sc_load`, `sc_synthdef`,
+  `sc_nodes`, `sc_server`. The old surface had six near-synonyms for "what is
+  running". `sc_capture` is the one that closes the loop: it plays a def, records
+  the def's own output, and answers with peak, RMS, clipping, tonality and the
+  strongest partials — because "a node exists" and "it sounds like a gong" are
+  different claims, and only the second one matters.
 - **Five skills** (`skills/<name>/SKILL.md`), registered at runtime *and* copied
   into `$DSH_HOME/skills` by both installers: `supercollider-live-coding`,
   `supercollider-synthdefs`, `supercollider-language`, `supercollider-scout-docs`,
   `supercollider-projects`. Every fenced `supercollider` example in them is
   compiled against the machine's own class library by
-  `scripts/checks/check-sc-examples.mjs` — **39 examples, compiled, plus one that
+  `scripts/checks/check-sc-examples.mjs` — **42 examples, compiled, plus one that
   is asserted NOT to compile.**
 - **The installed reference, indexed.** 1146 `.schelp` files on the machine this
   was written on. The ranker is the ported one, weights unchanged: content +4,
@@ -64,8 +71,9 @@ engine for a client that has no harness at all.
 |---|---|
 | row | `supercollider`, with a browser half |
 | routes | three exact paths, `GET`/`HEAD`/`POST` only |
-| tools | 10 |
+| tools | 11 |
 | skills | 5 |
+| examples | 16 playable instruments (`examples/`, reachable through `sc_project action=examples`) |
 | touches | no core row disabled, no fork, no npm dependency, no vendored engine, no bundled binary |
 
 | Route | What it answers |

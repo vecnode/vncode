@@ -14,6 +14,9 @@
 //   - splice in DockTree (packages/dsh-rightbar/vendor/dock-tree.js) above intentsFor
 //   - give the DockTree wrapper what the flat tab host provided: the opaque bg-base fill and the bar own left seam
 //   - put the fullscreen bar on the dock layer above the shell chrome and below the app popovers
+//   - seed the default page when a surface is first materialized, not only on the next action
+//   - materializing a surface settles it, so an already-open bar is not left empty
+//   - the default page is always the guide, not whichever single entry won the boot race
 // The pack's bundle layer disables the core row, so this copy is the one that
 // runs. Re-sync with:  powershell -NoProfile -ExecutionPolicy Bypass -File scripts\sync-vendored.ps1
 //
@@ -601,8 +604,7 @@ window.__ModuleLoader__.load({
 		* @returns the sole entry, or the guide when there are zero or multiple entries.
 		*/
 		function defaultSeed(tabs) {
-			const [only, ...others] = tabs.guide();
-			const kind = only !== void 0 && others.length === 0 ? only.kind : GUIDE_KIND;
+			const kind = GUIDE_KIND;
 			const definition = tabs.get(kind);
 			if (definition === void 0) throw new Error(`sidebarRight: default tab kind "${kind}" is not registered`);
 			return {
@@ -5230,6 +5232,18 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 		* A session with no surface yet gets its initial one even when the intent
 		* changes nothing: materializing is itself the change.
 		*/
+		function settleSurface(surface, seed) {
+			const counter = counting(surface.minted);
+			const makeTab = (id) => seedRecord(id, seed);
+			const settled = (0, _deepseek_ai_dsh_client_ui_dockkit.planSettle)(surface.layout, counter.mint, surface.layout.expanded ? makeTab : void 0);
+			if (settled.length === 0) return surface;
+			const stepped = (0, _deepseek_ai_dsh_client_ui_dockkit.record)(surface.history, surface.layout, settled);
+			return {
+				layout: stepped.state,
+				history: stepped.history,
+				minted: counter.used()
+			};
+		}
 		function seat(state, sessionId, next) {
 			const existing = state.bySession[sessionId];
 			const updated = next(existing ?? createSurface());
@@ -5261,7 +5275,7 @@ Set the \`cycles\` parameter to \`"ref"\` to resolve cyclical schemas with defs.
 				init: () => ({ bySession: {} }),
 				actions: {
 					open: (d, sessionId) => {
-						d.bySession = seat(d, sessionId, (surface) => surface);
+						d.bySession = seat(d, sessionId, (surface) => settleSurface(surface, seed));
 					},
 					setExpanded: (d, sessionId, expanded) => {
 						d.bySession = seat(d, sessionId, (s) => advance(s, (state) => (0, _deepseek_ai_dsh_client_ui_dockkit.planSetExpanded)(state, expanded), seed));

@@ -360,6 +360,124 @@ export class Scsynth {
     return this.send({ port: options.port, address: '/g_freeAll', args: [options.group ?? 0] })
   }
 
+  /**
+   * Allocate a server buffer (`/b_alloc`).
+   *
+   * A buffer is the only memory the engine has in the audio server, and it is
+   * what makes a measurement possible at all: the server can write what it is
+   * playing into one, and this side can read it back and compute.
+   *
+   * @param options - `{ port, bufnum, frames, channels, completion }`.
+   * @returns `{ ok, error }`.
+   */
+  async bufferAlloc(options) {
+    const args = [options.bufnum, options.frames]
+    if (Number.isInteger(options.channels) && options.channels > 0) args.push(options.channels)
+    const sent = await this.send({ port: options.port, address: '/b_alloc', args })
+    if (!sent.ok) return sent
+    // `/b_alloc` is asynchronous; `/sync` is the barrier that proves it landed
+    // before a SynthDef is asked to record into it.
+    if (options.completion !== false) await this.sync({ port: options.port })
+    return { ok: true, error: null }
+  }
+
+  /** Free a server buffer (`/b_free`). */
+  async bufferFree(options) {
+    return this.send({ port: options.port, address: '/b_free', args: [options.bufnum] })
+  }
+
+  /**
+   * Write floats into a buffer (`/b_setn`), in chunks of 1024 as the OSC spec
+   * recommends for `_setn` messages.
+   *
+   * @param options - `{ port, bufnum, start, values }`.
+   * @returns `{ ok, error, chunks }`.
+   */
+  async bufferSetn(options) {
+    const values = Array.from(options.values ?? [])
+    const start = options.start ?? 0
+    let chunks = 0
+    for (let offset = 0; offset < values.length; offset += 1024) {
+      const slice = values.slice(offset, offset + 1024)
+      const sent = await this.send({
+        port: options.port,
+        address: '/b_setn',
+        args: [options.bufnum, start + offset, slice.length, ...slice],
+      })
+      if (!sent.ok) return { ok: false, error: sent.error, chunks }
+      chunks += 1
+    }
+    return { ok: true, error: null, chunks }
+  }
+
+  /**
+   * Read floats out of a buffer (`/b_getn`), in datagram-sized chunks.
+   *
+   * Two rules from the OSC spec govern this, and getting either wrong loses data
+   * silently:
+   *
+   *   1. A `/b_getn` reply is **one `/b_setn`** message, unless it would exceed
+   *      the maximum datagram size, in which case it arrives as several — so a
+   *      read collects until the deadline rather than expecting a known count.
+   *   2. A *request* for more samples than fit in one reply is not served at all.
+   *      Measured against scsynth 3.14.1: asking for 96 000 floats got **no
+   *      reply**, while 512 floats round-tripped exactly. A capture of one
+   *      second of stereo audio is 96 000 floats, so this is the normal case, not
+   *      an edge case.
+   *
+   * Hence: request in chunks small enough that every reply fits one datagram
+   * (8192 floats is 32 KiB of payload, comfortably under the 64 KiB limit), and
+   * concatenate.
+   *
+   * @param options - `{ port, bufnum, start, count, timeoutMs, chunk }`.
+   * @returns `{ ok, values, error, replies }`.
+   */
+  async bufferGetn(options) {
+    const count = Math.max(0, Math.floor(options.count ?? 0))
+    if (count === 0) return { ok: true, values: [], error: null, replies: 0 }
+    const start = options.start ?? 0
+    const chunkSize = Math.max(1, Math.min(options.chunk ?? 8192, 16384))
+    const socket = await this.socketFor()
+    const values = []
+    let replies = 0
+    for (let offset = 0; offset < count; offset += chunkSize) {
+      const size = Math.min(chunkSize, count - offset)
+      const collected = await socket.collect({
+        port: options.port,
+        address: '/b_getn',
+        args: [options.bufnum, start + offset, size],
+        // A window rather than one reply: the tail of an odd-sized read arrives
+        // as its own datagram.
+        windowMs: options.timeoutMs ?? 500,
+        match: (message) => message.address === '/b_setn' && message.args?.[0] === options.bufnum && message.args?.[1] === start + offset,
+      })
+      const part = collected.flatMap((message) => message.args.slice(3))
+      if (part.length === 0) {
+        return {
+          ok: false,
+          values,
+          replies,
+          error: 'the server did not answer /b_getn for ' + size + ' samples at offset ' + (start + offset) + ' within the deadline',
+        }
+      }
+      values.push(...part)
+      replies += collected.length
+    }
+    return { ok: true, values: values.slice(0, count), error: null, replies }
+  }
+
+  /** The `/sync` barrier: resolved when the server has run everything sent before it. */
+  async sync(options = {}) {
+    const reply = await this.request({
+      port: options.port,
+      address: '/sync',
+      args: [options.id ?? 0],
+      timeoutMs: options.timeoutMs ?? 2_000,
+      match: (message) => message.address === '/synced' && (options.id === undefined || message.args?.[0] === options.id),
+    })
+    return reply !== null
+  }
+
   /** Create a synth node. */
   async newSynth(options) {
     const args = [options.name, options.nodeId ?? -1, options.addAction ?? 0, options.target ?? 0]

@@ -69,15 +69,27 @@ export async function readAsset(name) {
 }
 
 /**
- * Make one submission safe to write to `sclang`'s standard input.
+ * How much code may travel inline through the REPL before it is written to a
+ * file instead.
  *
- * **The REPL evaluates per LINE.** A block pasted into the SuperCollider IDE is
- * parsed as a whole, but the same block written to the interpreter's stdin is
- * read one line at a time: the opening `(` is parsed on its own and reported as
- * `syntax error, unexpected end of file, expecting ')'`, and every line after it
- * fails the same way. Measured, on 3.14.1 — see the transcript in
- * `scripts/checks/check-sc-node.mjs`'s fixtures. So a multi-line submission has
- * to become ONE line before it is written.
+ * The REPL is a line protocol and a long single line is fragile: it is echoed
+ * back, it shares one stream with its own output, and sclang's readline has to
+ * hold all of it. Anything past this is written by Node and `interpret`ed by
+ * path, which has no such limit and — more importantly — needs no rewriting of
+ * the author's text. Measured: `sc_load` of an 85-line `.scd` full of `//`
+ * comments arrived at the interpreter with the comments and the newlines gone
+ * and failed with `syntax error, unexpected VAR`, because `var` declarations
+ * that were legal on their own lines were no longer at the top of a block.
+ */
+export const INLINE_SOURCE_LIMIT = 2_000
+
+/**
+ * Make one submission safe to write to `sclang`'s standard input, as ONE line.
+ *
+ * Only used for short inline snippets now. **The REPL evaluates per LINE**, so a
+ * multi-line block written to stdin is read a line at a time and fails; a
+ * multi-line submission therefore goes to a file instead (see `buildSubmission`),
+ * where the text is preserved exactly.
  *
  * Collapsing newlines changes the meaning of two things, and both are removed
  * first:
@@ -161,12 +173,57 @@ export function normalizeSubmission(source) {
 }
 
 /**
+ * Whether a submission must go through a file rather than the REPL line.
+ *
+ * Three cases, and any one of them is enough:
+ *
+ *   - it is multi-line, so collapsing it would change where a `var` sits;
+ *   - it is longer than the inline limit, so the REPL echo would swamp it;
+ *   - it contains a `//` or `/*` outside a string, because stripping a comment
+ *     is a chance to strip code by mistake and there is no need to take it.
+ *
+ * @param source - the sclang source.
+ * @returns true when the file path must be used.
+ */
+export function needsTempFile(source) {
+  const text = String(source ?? '')
+  if (text.length > INLINE_SOURCE_LIMIT) return true
+  if (/[\r\n]/.test(text)) return true
+  return hasCommentOutsideString(text)
+}
+
+/** Whether a `//` or `/*` appears outside a string or character literal. */
+function hasCommentOutsideString(text) {
+  let quote = null
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (quote !== null) {
+      if (char === '\\') index += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char === '/' && (text[index + 1] === '/' || text[index + 1] === '*')) return true
+  }
+  return false
+}
+
+/** A sclang string literal for a path, with backslashes doubled. */
+function pathLiteral(file) {
+  return '"' + String(file).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+}
+
+/**
  * The action a request is wrapped in, as ONE line.
  *
- * `var` is deliberately absent: at the top level of the REPL's wrapping
- * parenthesis a `var` declaration is a syntax error (`unexpected VAR` —
- * measured), so the wrapper binds with `try`'s argument and an assignment
- * instead.
+ * `var` is deliberately absent everywhere in this generated code: sclang allows
+ * a `var` only at the top of a *function* body, so a `var` inside a `try` branch
+ * or a `{ }` argument block is `syntax error, unexpected VAR`. That mistake was
+ * made here once and it is why the error handler now reads
+ * `err.errorString` directly instead of binding it first.
  *
  * @param options - `{ id, code, mode, file }`.
  * @returns the sclang source to submit, with no newline in it.
@@ -185,7 +242,7 @@ export function buildAction(options) {
     // The path goes into an sclang double-quoted string, so its backslashes are
     // doubled: a Windows path is `C:\\Users\\…` to SuperCollider, and `\U` is
     // otherwise an escape sequence.
-    const literal = '"' + String(options.file).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+    const literal = pathLiteral(options.file)
     lines.push('  var f = File.open(' + literal + ', "w");')
     lines.push('  if (f.isNil) {')
     lines.push('    "<RI:' + id + ':ERR>could not open the answer file for writing</RI>".postln;')
@@ -204,6 +261,129 @@ export function buildAction(options) {
   return lines.join(' ')
 }
 
+/**
+ * The submission for one request, as the sclang source to write to stdin.
+ *
+ * **Files, not collapsed lines.** A submission that is multi-line, long, or
+ * contains a comment is written to a file by the caller and read here with
+ * `interpret`, so the author's text reaches the compiler exactly as it was
+ * written: comments intact, newlines intact, and `var` still where it belongs.
+ * That is the fix for the failure mode where loading a `.scd` produced
+ * `syntax error, unexpected VAR` — or, worse, an error report whose text was the
+ * generated wrapper itself.
+ *
+ * Every `var` is gone from the generated code on purpose: sclang allows a `var`
+ * only at the top of a *function* body, so one inside a `try` branch is
+ * `syntax error, unexpected VAR`. The result is carried in `~dshResult`, an
+ * environment variable, which needs no declaration and cannot collide with the
+ * author's own `var`s.
+ *
+ * The reply contract is unchanged: `#LINE <id>` first, then exactly one
+ * `<RI:<id>:OK|ERR|FILE>…</RI>` line.
+ *
+ * @param options - `{ id, code, mode, file, nativeFile }`. `nativeFile` is the
+ *   already-written file holding the code; when present the code is read and
+ *   interpreted from it.
+ * @returns the sclang source to submit, with no newline in it.
+ */
+export function buildSubmission(options) {
+  const id = options.id
+  const mode = options.mode ?? 'inline'
+  const native = typeof options.nativeFile === 'string' && options.nativeFile !== ''
+  const body = native
+    ? 'File.use(' + pathLiteral(options.nativeFile) + ', "r", { |f| ~dshResult = f.readAllString.interpret.asString })'
+    : '~dshResult = ({ ' + normalizeSubmission(options.code) + ' }.value).asString'
+  const success =
+    mode === 'file'
+      ? 'File.use(' +
+        pathLiteral(options.file) +
+        ', "w", { |f| f.write(~dshResult ?? "") });' +
+        ' ("<RI:' +
+        id +
+        ':FILE>" ++ ' +
+        pathLiteral(options.file) +
+        ' ++ ":" ++ (~dshResult ?? "").size.asString ++ "</RI>").postln'
+      : '("<RI:' + id + ':OK>" ++ (~dshResult ?? "nil") ++ "</RI>").postln'
+
+  return (
+    '(' +
+    ' "#LINE ' + id + '".postln;' +
+    ' try {' +
+    ' ' + body + ';' +
+    ' ' + success + ';' +
+    ' } { |err|' +
+    ' ("<RI:' + id + ':ERR>" ++ err.class.asString ++ ": " ++ (err.errorString.asString ?? err.asString) ++ "</RI>").postln;' +
+    ' };' +
+    ' )'
+  )
+}
+
+/**
+ * A syntax error out of a REPL transcript, with the line it names.
+ *
+ * A parse error means **the code never ran**, so there is no `<RI:…>` marker to
+ * find and a bare timeout was the only thing the caller ever saw. sclang prints
+ * the reason and the position itself, so it is read from there rather than
+ * waited for.
+ *
+ * @param transcript - the text captured since the request was written.
+ * @returns `{ message, line, column, source }` or null.
+ */
+export function extractSyntaxError(transcript) {
+  const text = String(transcript ?? '')
+  const match = /ERROR:\s*(syntax error[^\n]*)/.exec(text)
+  if (match === null) return null
+  const message = match[1].trim()
+  const where = /line (\d+) char (\d+)/.exec(text)
+  return {
+    message,
+    line: where === null ? null : Number(where[1]),
+    column: where === null ? null : Number(where[2]),
+    source: /in interpreted text/.test(text) ? 'interpreted text' : 'unknown',
+  }
+}
+
+/**
+ * One error out of a REPL transcript, as a short report for the caller.
+ *
+ * This exists because `String:interpret` **does not raise**: a file with a
+ * syntax error is parsed, the reason is printed to the transcript, and the
+ * expression returns nil. So a load of a broken file would otherwise report
+ * success with no value — the worst possible answer, because the agent then
+ * believes the patch is live. It is also what turns sclang's own error block
+ * into something a caller can read instead of the generated wrapper's text.
+ *
+ * @param transcript - the text captured since the request was written.
+ * @returns `{ message, line, detail }` or null.
+ */
+export function extractInterpreterError(transcript) {
+  const text = String(transcript ?? '')
+  const marker = text.search(/ERROR:/)
+  if (marker < 0) return null
+  const tail = text.slice(marker, marker + 1_600)
+  const first = /ERROR:\s*([^\n]*)/.exec(tail)
+  const where = /line (\d+) char (\d+)[^\n]*/.exec(tail)
+  const caret = /\n([^\n]*)\n(\s*\^+)[^\n]*/.exec(tail)
+  const position = where === null ? '' : ' at line ' + where[1] + ' char ' + where[2]
+  const code = caret === null ? '' : '\n  ' + caret[1].trim() + '\n  ' + caret[2].trim()
+  return {
+    message: (first === null ? 'the interpreter reported an error' : first[1].trim()) + position + code,
+    line: where === null ? null : Number(where[1]),
+    detail: tail.split('\n').slice(0, 24).join('\n').trim(),
+  }
+}
+
+/**
+ * The action a request is wrapped in, as ONE line.
+ *
+ * `var` is deliberately absent: at the top level of the REPL's wrapping
+ * parenthesis a `var` declaration is a syntax error (`unexpected VAR` —
+ * measured), so the wrapper binds with `try`'s argument and an assignment
+ * instead.
+ *
+ * @param options - `{ id, code, mode, file }`.
+ * @returns the sclang source to submit, with no newline in it.
+ */
 /**
  * Parse a reply out of a captured REPL transcript.
  *
@@ -431,6 +611,34 @@ export class SclangSession {
       this.counter += 1
       const id = String(this.counter) + '-' + Math.random().toString(36).slice(2, 8)
       const started = Date.now()
+      // Set when this submission had to be written out for `interpret`. Removed
+      // in the `finally` below, whatever the request does.
+      let codeFile = null
+      try {
+        return await this.#run(request, id, started, (file) => {
+          codeFile = file
+        })
+      } finally {
+        if (codeFile !== null) await fsp.rm(codeFile, { force: true }).catch(() => {})
+      }
+    }
+
+    const queued = this.queue.then(run, run)
+    // Keep the chain alive whatever the request does, and never let a rejected
+    // link poison the next request.
+    this.queue = queued.then(
+      () => undefined,
+      () => undefined,
+    )
+    return queued
+  }
+
+  /**
+   * The body of one request, with the code file already written by the caller's
+   * hook so it can be cleaned up by `#direct`.
+   */
+  async #run(request, id, started, onCodeFile) {
+    {
       let source
       if (request.action === 'bind') {
         source =
@@ -442,7 +650,19 @@ export class SclangSession {
           ' )'
       } else {
         const file = request.mode === 'file' ? request.file ?? (await this.#channelFile()) : undefined
-        source = buildAction({ id, code: request.code, mode: request.mode ?? 'inline', file })
+        // A multi-line or comment-bearing submission is written out and
+        // `interpret`ed by path, so the author's text reaches the compiler
+        // unchanged. See `buildSubmission` for why that is not optional.
+        const raw = String(request.code ?? '')
+        const codeFile = needsTempFile(raw) ? await this.#codeFile(raw) : null
+        if (codeFile !== null) onCodeFile(codeFile)
+        source = buildSubmission({
+          id,
+          code: raw,
+          mode: request.mode ?? 'inline',
+          file,
+          nativeFile: codeFile ?? undefined,
+        })
       }
       const before = this.transcript.length
       // A trailing newline submits the whole parenthesised block at once: sclang
@@ -474,23 +694,46 @@ export class SclangSession {
       if (found.state === 'file') {
         return { ok: true, kind: 'file', text: '', file: found.file, bytes: found.bytes, error: null, ms, transcript: '' }
       }
+      // A parse error never reaches the try block, so the reply is an OK holding
+      // `nil` while the reason sits in the transcript. `interpret` does not
+      // raise, so this is the only place the failure can be caught — without it
+      // a broken `.scd` loads "successfully" and the agent believes it is live.
+      if (found.payload === 'nil') {
+        const reported = extractInterpreterError(this.transcript.slice(before))
+        if (reported !== null) {
+          return {
+            ok: false,
+            kind: 'error',
+            text: reported.message,
+            file: null,
+            bytes: 0,
+            error: 'the code did not parse or run: ' + reported.message,
+            ms,
+            transcript: reported.detail,
+          }
+        }
+      }
       return { ok: true, kind: 'inline', text: found.payload, file: null, bytes: found.payload.length, error: null, ms, transcript: '' }
     }
-
-    const queued = this.queue.then(run, run)
-    // Keep the chain alive whatever the request does, and never let a rejected
-    // link poison the next request.
-    this.queue = queued.then(
-      () => undefined,
-      () => undefined,
-    )
-    return queued
   }
 
   /** A fresh path in the session's channel directory. */
   async #channelFile() {
     await ensureDirs(this.home, ['tmp'])
     return path.join(this.home, 'dsh-supercollider', 'tmp', uniqueName('answer', '.txt'))
+  }
+
+  /**
+   * Write a submission out so it can be `interpret`ed by path.
+   *
+   * `.scd` is the extension on purpose: an error message then quotes a file the
+   * reader can recognise, and `String:interpret` does not care either way.
+   */
+  async #codeFile(code) {
+    await ensureDirs(this.home, ['tmp'])
+    const file = path.join(this.home, 'dsh-supercollider', 'tmp', uniqueName('code', '.scd'))
+    await fsp.writeFile(file, String(code), 'utf8')
+    return file
   }
 
   /** Append to the transcript, notify listeners and bound the buffer. */

@@ -273,6 +273,66 @@ $vendored = @(
                 Label   = 'put the fullscreen bar on the dock layer above the shell chrome and below the app popovers'
                 Find    = '.P3OORG_panel[data-sidebar-right-panel=fullscreen]{--dsh-dockkit-dock-layer:40}'
                 Replace = '.P3OORG_panel[data-sidebar-right-panel=fullscreen]{--dsh-dockkit-dock-layer:40;z-index:40}'
+            },
+            # The right bar opens EMPTY on the first paint of a fresh session and
+            # fills only once the user does something. A store action that changes
+            # the layout plans through `advance`, which ends with `planSettle` - the
+            # rule that seeds the default page into an expanded, tab-less pane. But
+            # `open` (the action that materializes a session's surface) calls `seat`
+            # directly and plans nothing, and `createSurface` is deliberately
+            # collapsed and tab-less. So a bar that is already on screen and expanded
+            # at boot never runs a settle: the pane shows the kit's "Empty pane"
+            # label until the first click on the strip's "+" or a link, and that
+            # click is what creates the Start tab. This runs the settle at
+            # materialization, which is the one place the intent is missing.
+            # `planSettle` with an undefined factory leaves a COLLAPSED surface
+            # alone, so the documented "a collapsed column never holds a page nobody
+            # asked for" behaviour is preserved.
+            [pscustomobject]@{
+                Label   = 'seed the default page when a surface is first materialized, not only on the next action'
+                Find    = @(
+                    ((T 2) + 'function seat(state, sessionId, next) {'),
+                    ''
+                ) -join "`n"
+                Replace = @(
+                    ((T 2) + 'function settleSurface(surface, seed) {'),
+                    ((T 3) + 'const counter = counting(surface.minted);'),
+                    ((T 3) + 'const makeTab = (id) => seedRecord(id, seed);'),
+                    ((T 3) + 'const settled = (0, _deepseek_ai_dsh_client_ui_dockkit.planSettle)(surface.layout, counter.mint, surface.layout.expanded ? makeTab : void 0);'),
+                    ((T 3) + 'if (settled.length === 0) return surface;'),
+                    ((T 3) + 'const stepped = (0, _deepseek_ai_dsh_client_ui_dockkit.record)(surface.history, surface.layout, settled);'),
+                    ((T 3) + 'return {'),
+                    ((T 4) + 'layout: stepped.state,'),
+                    ((T 4) + 'history: stepped.history,'),
+                    ((T 4) + 'minted: counter.used()'),
+                    ((T 3) + '};'),
+                    ((T 2) + '}'),
+                    ((T 2) + 'function seat(state, sessionId, next) {'),
+                    ''
+                ) -join "`n"
+            },
+            [pscustomobject]@{
+                Label   = 'materializing a surface settles it, so an already-open bar is not left empty'
+                Find    = ((T 5) + 'd.bySession = seat(d, sessionId, (surface) => surface);')
+                Replace = ((T 5) + 'd.bySession = seat(d, sessionId, (surface) => settleSurface(surface, seed));')
+            },
+            # The bar's default page was chosen from how many guide entries happened
+            # to be registered at the instant of the first seed: with exactly ONE
+            # registered it opened THAT plugin's page instead of Start, and with zero
+            # or several it opened Start. The pack's bundles apply asynchronously, so
+            # which one won was a boot-order race - and the page a user calls "Start"
+            # must not depend on a race. It is always the guide's own page.
+            [pscustomobject]@{
+                Label   = 'the default page is always the guide, not whichever single entry won the boot race'
+                Find    = @(
+                    ((T 3) + 'const [only, ...others] = tabs.guide();'),
+                    ((T 3) + 'const kind = only !== void 0 && others.length === 0 ? only.kind : GUIDE_KIND;'),
+                    ''
+                ) -join "`n"
+                Replace = @(
+                    ((T 3) + 'const kind = GUIDE_KIND;'),
+                    ''
+                ) -join "`n"
             }
         )
     },

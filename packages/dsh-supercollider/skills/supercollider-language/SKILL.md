@@ -95,6 +95,44 @@ var base = 110;
 )
 ```
 
+### Where `var` is legal, exactly
+
+`var` is legal as the first statement of **its own enclosing braces** — a function
+body. A block passed to `try`, to `if`, to `do`, to `collect` is a function body, so
+a `var` inside one is fine. All of this is legal, and all of it was measured:
+
+```supercollider
+try {
+	var inside = 2;        // legal: the try branch is a function body
+	inside
+} { |err| err.errorString };
+```
+
+```supercollider
+if (true) { var a = 41; a } { 0 };     // legal: 41
+[1, 2, 3].collect { |n| var d = n * 2; d };   // legal: [2, 4, 6]
+```
+
+The failure is narrower than "a var anywhere but the top", and it is worth knowing
+precisely, because the mistake that produces it is usually not in the code you
+wrote — it is in code that got rewritten:
+
+```supercollider invalid
+(
+1 + 1;
+var a = 2;      // a var that is NOT the first statement of its block
+a;
+)
+```
+
+The enclosing braces matter, and nothing else does. A `.scd` file is full of blocks
+where a `var` is perfectly legal; the same text fails only when it is flattened so
+that the `var` is no longer first. That is the real trap, and it is why this engine
+writes multi-line code to a file and `interpret`s it by path instead of collapsing
+it into one line: **collapsing a file is what moves a `var` off the top of its
+block.** If you ever see `unexpected VAR` for code that is obviously correct, look
+for something that rewrote the text, not for the `var`.
+
 ## `~variables` — the environment
 
 A name starting with `~` lives in the interpreter's current environment, not in a

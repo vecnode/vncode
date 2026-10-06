@@ -6,6 +6,26 @@ whenToUse: Use when asked to make, play, improvise, accompany or live-code music
 
 # Live coding SuperCollider
 
+## A shelf to start from
+
+This package ships sixteen playable instruments — a modal gong, an FM bell, a
+plucked string, three drum voices, a pad, a formant voice, a glass choir, an organ,
+a grain cloud, a feedback drone, a noise texture, a bitcrusher, a theremin. They are
+the fastest way to a piece that already sounds like something:
+
+```
+sc_project action=examples            # the catalogue
+sc_project action=examples file="1"    # loads 01-modal-gong into the live session
+sc_exec   code="~gong.value(62)"       # strike it
+sc_exec   code="~gong.value(98)"       # and again, higher
+```
+
+Every file defines one `SynthDef` plus a `~helper`, so it slots straight into the
+build-it-up workflow below: trigger the helper, layer a second one, then change the
+running sound with `sc_nodes` action=set. Start there and edit, rather than
+inventing an instrument when the user asks for "a bell" or "something that sounds
+like water".
+
 The point of a live session is that **the sound keeps playing while you change
 it**. A SuperCollider session driven by `sc_exec` keeps its interpreter alive
 between calls, so everything you define stays defined: a `~variable`, an `Ndef`,
@@ -188,3 +208,54 @@ Ndef(\drone).set(\amp, 0.05);
 Ndef(\air).stop;
 Ndef(\drone).stop;
 ```
+
+## Check what you actually made
+
+Live coding is the easiest place to fool yourself: a node is playing, the tool
+said OK, and the sound is not what you think it is. Before you describe a sound to
+the user — especially before you call it a bell, a gong, a pluck or a drum — run
+`sc_capture` on it and read the numbers. It reports peak, RMS, clipping, tonality
+and the strongest partials, so "it sounds like noise" becomes a specific,
+actionable fact instead of an argument.
+
+Two things it catches that nothing else does:
+
+- **The node exists but is not what you asked for.** `/s_new` has no reply, so a
+  refused node looks exactly like a working one. `sc_capture` proves sound came out;
+  `sc_server action=diagnose` prints the server log that names the refusal.
+- **Clipping.** A resonator bank sums its modes, so an instrument that is lovely at
+  one velocity squares off at another and is heard as noise. If `peak` is above 0.9,
+  lower the gain and measure again.
+
+## What this environment does and does not give you
+
+Some of these are properties of a headless `sclang` driven over pipes, and knowing
+them saves an hour of chasing a bug that is not in your code:
+
+- **The interpreter cannot receive server replies.** Anything that waits for
+  scsynth to answer — `s.sync`, `Buffer:loadToFloatArray`, `Bus:get`, `/b_getn`
+  from the language — will hang or come back empty. This is why measurement is a
+  tool (`sc_capture`) that talks OSC itself rather than something you do in
+  sclang.
+- **`.wait` is illegal on the main thread.** It deadlocks, the call times out, and
+  the interpreter is restarted, losing everything. `.wait` is only legal inside a
+  `Routine` or a `Task`.
+- **Language-side scheduling is not reliable here.** `SystemClock.sched` and a
+  `Routine` started with `.play` may never run, because the interpreter only
+  advances when it is given work. To sequence sounds over time, schedule them **on
+  the server** with a timestamped bundle, which needs no interpreter at all:
+
+  ```supercollider
+  // three strikes at 0.2 s, 6.5 s and 14 s: the server plays them, the
+  // interpreter is not involved
+  Server.default.sendBundle(0.2,  ["/s_new", "gong", 2001, 0, 0, "amp", 1.0]);
+  Server.default.sendBundle(6.5,  ["/s_new", "gong", 2002, 0, 0, "amp", 0.85]);
+  Server.default.sendBundle(14.0, ["/s_new", "gong", 2003, 0, 0, "amp", 0.7]);
+  ```
+
+- **A multi-line submission is written to a file and `interpret`ed by path**, so
+  comments and newlines reach the compiler as written. Short single-line snippets
+  are normalised instead. Either way, you do not have to rewrite your code to suit
+  the transport.
+- **A timed-out call restarts the interpreter** and everything it defined is gone.
+  Keep snippets quick; put long unrolling in the server, not in a loop.

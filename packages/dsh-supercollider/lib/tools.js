@@ -34,7 +34,9 @@ import { clip, docsIndexStatus, formatAnswer, formatSearch } from './engine/docs
 import { resolveHelpRoot } from './engine/install.js'
 import { readText, tailFile } from './engine/log.js'
 import { readSource, writeSource, listSources } from './engine/project.js'
+import { listExamples, findExample } from './engine/examples.js'
 import { DEFAULT_PORT } from './engine/scsynth.js'
+import { analyse } from './engine/analysis.js'
 
 /** The most results a docs search will return. */
 export const DOC_SEARCH_MAX = 12
@@ -568,6 +570,7 @@ export function buildTools(deps) {
     name: 'sc_project',
     description: [
       'Work with `.scd` SuperCollider files on disk — how SuperCollider is actually used. `list` finds the source files under a directory, `read` returns one, `write` creates or replaces one atomically, and `send` evaluates a file that is on disk in the live session (the edit-here / hear-it loop).',
+      '`examples` lists the playable instruments this package ships (a modal gong, an FM bell, a plucked string, drum voices, drones, granular and feedback textures, a bitcrusher, a theremin) and, with `file` or an index, reads one and sends it straight into the live session — each file ends by defining a `~helper` you can trigger. START FROM THESE instead of writing an instrument from nothing: they are known to sound like what they say, and each one explains the single DSP idea it is built on.',
       'A relative path resolves against the conversation workspace; an absolute path is allowed and is reported back resolved. Only SuperCollider source extensions are accepted (`.scd`, `.sc`, `.schelp`, `.scsyndef`).',
       '`write` will not replace an existing file unless you pass `overwrite: true`, so an agent cannot silently discard a file the user wrote by hand.',
     ].join('\n'),
@@ -576,8 +579,8 @@ export function buildTools(deps) {
       additionalProperties: false,
       required: ['action'],
       properties: {
-        action: { type: 'string', enum: ['list', 'read', 'write', 'send'], description: 'What to do.' },
-        file: { type: 'string', description: 'The `.scd` file. Relative paths resolve against the conversation workspace.' },
+        action: { type: 'string', enum: ['list', 'read', 'write', 'send', 'examples'], description: 'What to do.' },
+        file: { type: 'string', description: 'The `.scd` file. Relative paths resolve against the conversation workspace. For `examples`, an example name, slug or number (e.g. "3", "03-fm-bell") to read and send; with no `file` the whole catalogue is listed.' },
         code: { type: 'string', description: 'For `write`: the source text to write.' },
         dir: { type: 'string', description: 'For `list`: the directory to search (default the workspace).' },
         depth: { type: 'number', description: 'For `list`: how deep to recurse (default 3, maximum 6).' },
@@ -589,6 +592,61 @@ export function buildTools(deps) {
     presentResult: (_args, result) => ({ card: 'generic', title: 'SuperCollider project', content: result.text }),
     async execute(args, exec) {
       return run('sc_project', args, exec, async () => {
+        if (args.action === 'examples') {
+          // No `file`: the catalogue, which is the list of things worth hearing.
+          if (args.file === undefined || String(args.file).trim() === '') {
+            const { dir, examples } = listExamples()
+            if (examples.length === 0) {
+              return { ok: false, text: 'No examples are installed beside this package (' + dir + ' is missing or empty).', view: { summary: 'no examples' } }
+            }
+            const lines = ['Playable examples shipped with this package (' + examples.length + '), in ' + dir, '']
+            for (const entry of examples) {
+              lines.push('  ' + entry.file)
+              lines.push('      ' + entry.summary)
+              if (entry.synthDef !== null) {
+                lines.push('      SynthDef \\' + entry.synthDef + (entry.helper === null ? '' : '   helper ' + entry.helper))
+              }
+            }
+            lines.push('')
+            lines.push('Read and send one with: sc_project action=examples file="3"   (or the file name, or part of it).')
+            lines.push('Each file loads its instrument AND defines a `~helper`; trigger it with sc_exec, e.g. ~fmBell.value(440).')
+            return { ok: true, text: lines.join('\n'), view: { summary: examples.length + ' example(s)' } }
+          }
+          // One example: read it, define it in the live session, and say how to play it.
+          const found = findExample(args.file)
+          if (found === null) {
+            const { examples } = listExamples()
+            return {
+              ok: false,
+              text:
+                'No example matches "' + String(args.file) + '". Available: ' +
+                examples.map((entry) => entry.slug).join(', ') +
+                '. Pass a number or part of a name, or call action=examples with no `file` for the catalogue.',
+              view: { summary: 'no such example' },
+            }
+          }
+          const result = await session.evaluate({ code: found.text, timeoutMs: 60_000 })
+          if (!result.ok) {
+            return {
+              ok: false,
+              text: 'Loading the example ' + found.file + ' failed: ' + result.error + (result.text ? '\n\n--- the interpreter said ---\n' + result.text : ''),
+              view: { file: found.file, summary: 'example failed' },
+            }
+          }
+          const lines = [
+            'Loaded ' + found.file + ' — ' + found.summary,
+            '- SynthDef \\' + (found.synthDef ?? '<unknown>') + ' is now on the server' +
+              (found.helper === null ? '' : ', and ' + found.helper + ' is defined in the live session'),
+            '',
+            'Play it with sc_exec, for example:',
+            '  ' + found.helper + '.value(...)',
+            '',
+            'Measure it with sc_capture to see what it actually sounds like before describing it. The file:',
+            '',
+            found.text,
+          ]
+          return { ok: true, text: lines.join('\n'), ms: result.ms, view: { file: found.file, port: result.port ?? undefined, summary: 'example loaded' } }
+        }
         if (args.action === 'list') {
           const listed = await listSources({ dir: args.dir ?? '.', root: projectRoot(deps.env), depth: args.depth })
           if (!listed.ok) return { ok: false, text: listed.error, view: { summary: 'cannot list' } }
@@ -1060,16 +1118,577 @@ export function buildTools(deps) {
     },
   }
 
-  return [status, help, check, execTool, play, project, load, synthdef, nodes, server]
+  // -------------------------------------------------------------------------
+  // sc_capture — measure what the server actually played
+  // -------------------------------------------------------------------------
+  const capture = {
+    name: 'sc_capture',
+    description: [
+      'Play a sound and MEASURE what came out, so you can tell a tone from noise without asking anyone. This is the tool to reach for after building any instrument: it compiles a SynthDef from `source`, plays it, records the audio output for `seconds`, reads the samples back and reports peak, RMS, clipping, the spectral centroid and the strongest partials.',
+      'Example: `source`: "SynthDef(\\\\bell, { |freq = 440, amp = 0.2| Out.ar(0, Klank.ar(`[[freq, freq * 2.7], nil, [3, 1.5]], Impulse.ar(0, 0, 0.02)) * amp * EnvGen.kr(Env.perc(0.002, 4), doneAction: 2)) })", `params`: {"freq": 220}, `seconds`: 3.',
+      'Read the answer like this: `verdict` says whether it is tonal or noise; `peak` at or above 1.0 means the server clipped it, which is the single most common reason a modal model sounds like noise instead of a bell; `rms` near zero means it was silent; `partials` lists the strongest frequencies, so a model designed to ring at 62 Hz can be checked against what it really did. You can also test an existing SynthDef by name instead of passing `source`.',
+      'Use it before reporting a sound as finished, and whenever a user says what you played sounds wrong — it turns "sounds like noise" into a number you can act on.',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        source: { type: 'string', description: 'A complete SynthDef expression, e.g. "SynthDef(\\\\name, { ... })". It must reach Out.ar(0, ...). Either this or `name` is required.' },
+        name: { type: 'string', description: 'An existing SynthDef name to play instead of compiling one from `source`.' },
+        params: { type: 'object', description: 'Control values for the node, e.g. {"freq": 220}. Numbers only.' },
+        seconds: { type: 'number', description: 'How long to record, in seconds (default 3, maximum 20). This is wall-clock time the tool waits, so keep it just long enough to hear the attack and some of the decay.' },
+        amp: { type: 'number', description: 'Amplitude control to set, if the def has one (default: leave the def default).' },
+        debug: { type: 'boolean', description: 'Include the node tree captured during recording, for diagnosing a measurement that reports silence.' },
+      },
+    },
+    output,
+    presentCall: (args) => ({ card: 'generic', title: 'Measure ' + String(args?.name ?? 'sound'), kind: 'other' }),
+    presentResult: (_args, result) => ({ card: 'generic', title: 'Measurement', content: result.text }),
+    async execute(args, exec) {
+      return run('sc_capture', args, exec, async () => {
+        const seconds = Number.isFinite(args.seconds) ? Math.min(20, Math.max(0.25, Number(args.seconds))) : 3
+        const hasSource = typeof args.source === 'string' && args.source.trim() !== ''
+        const hasName = typeof args.name === 'string' && args.name.trim() !== ''
+        if (!hasSource && !hasName) {
+          return { ok: false, text: 'Nothing to measure: pass `source` (a SynthDef expression) or `name` (an already-loaded SynthDef).', view: { summary: 'nothing to play' } }
+        }
+        // The def's own name is the only one that matters: `/s_new` has to name a
+        // def the server actually has, so inventing one here (a unique name per
+        // call, say) creates a node that fails with "SynthDef not found" while
+        // every step reports success. The name is read out of the source instead.
+        const declared = hasSource ? declaredSynthDefName(String(args.source)) : null
+        if (hasSource && declared === null) {
+          return {
+            ok: false,
+            text: 'Could not read a SynthDef name out of `source`. It must be a complete SynthDef expression, e.g. `SynthDef(\\\\name, { |out = 0| Out.ar(out, ...) })`.',
+            view: { summary: 'no SynthDef name' },
+          }
+        }
+        // Measuring a def that is already on the server needs its SOURCE — the
+        // measurement works by rewriting the def's own `Out.ar`, and a name alone
+        // does not carry the code. The bundled example instruments are the common
+        // case (`sc_project action=examples file=1` loads one, then this measures
+        // it), and their source ships with the package, so it is read from there
+        // rather than making the caller paste it back in.
+        let source = hasSource ? String(args.source) : ''
+        let sourceFrom = null
+        if (!hasSource && hasName) {
+          const wanted = String(args.name)
+          // Only look in the library when the name is one of its SynthDefs, so a
+          // matching name can never pick up an unrelated example's code.
+          const match = listExamples().examples.find((entry) => entry.synthDef === wanted)
+          if (match !== undefined) {
+            source = String(match.text)
+            sourceFrom = match.file
+          }
+        }
+        const measurable = source !== '' && declaredSynthDefName(source) !== null
+        const sourceName = measurable ? declaredSynthDefName(source) : null
+        const controls = normaliseParams(args.params)
+        if (controls.error !== null) return { ok: false, text: controls.error, view: { summary: 'bad params' } }
+
+        const ensured = await session.ensureServer({})
+        if (!ensured.ok) {
+          return {
+            ok: false,
+            text: 'No audio server is available, so nothing could be measured.\n- ' + ensured.error + '\n- call sc_server with action=boot first.',
+            view: { summary: 'no audio server' },
+          }
+        }
+        const port = ensured.port
+        const status = await session.scsynth.status({ port })
+        const sampleRate = Math.round(status.metrics?.actualSampleRate ?? status.metrics?.nominalSampleRate ?? 48_000) || 48_000
+        const channels = 2
+        const frames = Math.ceil(seconds * sampleRate)
+        // The name to report, and the name the source actually declares — which is
+        // the only one `/s_new` can use.
+        const name = sourceName ?? String(args.name ?? 'measured')
+
+        const monitored = measuredName(name)
+
+        // The tap, not a bus. The source is rewritten so its OWN `Out.ar` output is
+        // recorded inside the node that makes it — see `tapSynthDefSource` for the
+        // measurement that forced this design (a recorder on a private bus captured
+        // exact zeros while the same buffer written from inside the node captured
+        // the signal).
+        const tapped = measurable ? tapSynthDefSource(source, monitored) : null
+
+        const lines = []
+        lines.push('- SynthDef under test: ' + name)
+
+        if (!measurable) {
+          // A def that is on the server with no source anywhere cannot be tapped,
+          // and a bus read would report silence for a sound that is playing. So
+          // this says what it cannot do rather than inventing a wrong number.
+          return {
+            ok: false,
+            text:
+              'Cannot measure "' + name + '": the measurement records the def\'s own output, which means rewriting its `Out.ar`, and no source is available for that name.\n' +
+              '- pass the SynthDef expression as `source`, or\n' +
+              '- if it is one of the bundled instruments, use its SynthDef name (they are read from `examples/`), or\n' +
+              '- check the name against `sc_nodes action=tree` and `sc_synthdef action=list`.',
+            view: { port, summary: 'no source to measure' },
+          }
+        }
+        {
+          const compiled = await session.compileSynthDef({ name: monitored, source: tapped })
+          if (!compiled.ok) {
+            return {
+              ok: false,
+              text:
+                'The instrumented copy of that SynthDef would not compile, so there is nothing to measure.\n- ' + compiled.error +
+                (compiled.detail ? '\n\n--- the interpreter said ---\n' + compiled.detail : '') +
+                (args.debug === true ? '\n\n--- instrumented source ---\n' + tapped : ''),
+              view: { summary: 'compile failed' },
+            }
+          }
+          const loaded = await session.loadSynthDef({ name: monitored, source: tapped, file: compiled.file, port })
+          if (!loaded.ok) return { ok: false, text: 'The instrumented SynthDef compiled but the server would not take it: ' + loaded.error, view: { port, summary: 'load failed' } }
+          lines.push('- instrumented as ' + monitored + ' (' + compiled.bytes + ' bytes, compiled and loaded' + (sourceFrom === null ? '' : ', source read from ' + sourceFrom) + ')')
+          if (args.debug === true) lines.push('- debug: instrumented source = ' + tapped)
+        }
+
+        const bufnum = 90_001
+        if (!(await session.scsynth.bufferAlloc({ port, bufnum, frames, channels })).ok) {
+          return { ok: false, text: 'could not allocate a capture buffer', view: { summary: 'no buffer' } }
+        }
+        let recorded = null
+        try {
+          await session.scsynth.newSynth({
+            port,
+            name: monitored,
+            nodeId: 120_000,
+            target: 0,
+            addAction: 0,
+            params: { ...(controls.values ?? {}), out: 0, recBuf: bufnum, recSeconds: seconds },
+          })
+          // `/s_new` is fire-and-forget: it succeeds even when the server refuses
+          // the node ("SynthDef not found"), which is exactly how a broken
+          // measurement once looked like a working one. The node count is the
+          // honest check.
+          await delay(150)
+          const live = await session.scsynth.status({ port })
+          const running = live.metrics?.synthCount ?? null
+          if (args.debug === true) {
+            const tree = await session.scsynth.queryTree({ port, group: 0, flags: 1 })
+            lines.push('- debug: synthCount=' + running + ' tree=' + JSON.stringify(tree.raw))
+          }
+          if (running !== null && running < 1) {
+            return {
+              ok: false,
+              text:
+                'the server refused the node, so nothing was playing: it reports ' + running + ' running node(s) just after the sound was created. ' +
+                'The SynthDef is probably not resident. Run sc_server action=diagnose to read the server log, which names the reason.',
+              view: { port, summary: 'server refused the node' },
+            }
+          }
+          // The tap records for exactly `seconds`, then frees its own node.
+          await delay(Math.ceil(seconds * 1000) + 400)
+          recorded = await session.scsynth.bufferGetn({ port, bufnum, start: 0, count: frames * channels, timeoutMs: 500 })
+        } finally {
+          await session.scsynth.freeNode({ port, node: 120_000 }).catch(() => {})
+          await session.scsynth.bufferFree({ port, bufnum }).catch(() => {})
+        }
+
+        if (recorded === null || !recorded.ok) {
+          return { ok: false, text: 'the sound played but the recording could not be read back: ' + (recorded?.error ?? 'no reply'), view: { port, summary: 'capture failed' } }
+        }
+        const result = analyse(recorded.values, { channels, sampleRate })
+        lines.push('- recorded ' + result.seconds.toFixed(2) + ' s at ' + sampleRate + ' Hz, ' + result.channels + ' channels, captured from the def\'s own output')
+        lines.push('')
+        for (const channel of result.perChannel) {
+          lines.push(
+            'channel ' + channel.channel + ': peak ' + channel.peak.toFixed(4) +
+            '  rms ' + channel.rms.toFixed(5) +
+            (Number.isFinite(channel.dbfs) ? ' (' + channel.dbfs.toFixed(1) + ' dBFS)' : '') +
+            '  crest ' + channel.crest.toFixed(1) +
+            '  dc ' + channel.dc.toFixed(5),
+          )
+        }
+        lines.push('- tonality: ' + result.tone)
+        lines.push('- spectral centroid: ' + (result.worst.centroidHz === null ? 'n/a' : Math.round(result.worst.centroidHz) + ' Hz'))
+        if (result.worst.peaks !== undefined && result.worst.peaks.length > 0) {
+          lines.push('- strongest partials: ' + result.worst.peaks.map((peak) => peak.hz + ' Hz (' + peak.relative.toFixed(2) + ')').join(', '))
+        }
+        lines.push('')
+        if (result.clipping) {
+          lines.push('FAIL: the output is CLIPPING (' + result.worst.clipped + ' samples at full scale, ' + (result.worst.clippedRatio * 100).toFixed(2) + '%). The server hard-clips above 1.0, and clipped modal synthesis is heard as noise. Lower the def\'s output gain (or the `amp` you pass) until peak is below about 0.8.')
+        } else if (result.quiet) {
+          lines.push('FAIL: this is effectively SILENT (rms ' + result.worst.rms.toFixed(6) + '). Check that the def reaches Out.ar(0, ...), that its envelope is not closing immediately, and that `params` set an amplitude above zero.')
+        } else if (/noise|broadband/.test(result.tone)) {
+          lines.push('WARN: the spectrum is broadband, not tonal. For a struck or plucked model that usually means the excitation is too loud or too noisy relative to the resonators, the resonator ring times are too short, or something is clipping. If the sound was MEANT to be noise, ignore this.')
+        } else {
+          lines.push('OK: a tonal result with headroom. peak ' + result.worst.peak.toFixed(3) + ' leaves ' + (20 * Math.log10(Math.max(1e-6, 1 / Math.max(1e-6, result.worst.peak)))).toFixed(1) + ' dB before full scale.')
+        }
+        const ok = !result.clipping && !result.quiet
+        return {
+          ok,
+          text: lines.join('\n'),
+          view: {
+            port,
+            summary: result.clipping ? 'clipping' : result.quiet ? 'silent' : result.tone,
+            peak: Math.round(result.worst.peak * 1000) / 1000,
+            rms: Math.round(result.worst.rms * 100_000) / 100_000,
+          },
+        }
+      })
+    },
+  }
+
+  return [status, help, check, execTool, play, capture, project, load, synthdef, nodes, server]
 }
 
 /** The tool names, in the order they are registered. */
-export const TOOL_NAMES = ['sc_status', 'sc_help', 'sc_check', 'sc_exec', 'sc_play', 'sc_project', 'sc_load', 'sc_synthdef', 'sc_nodes', 'sc_server']
+export const TOOL_NAMES = ['sc_status', 'sc_help', 'sc_check', 'sc_exec', 'sc_play', 'sc_capture', 'sc_project', 'sc_load', 'sc_synthdef', 'sc_nodes', 'sc_server']
+
+/**
+ * Every character of `text` that is inside a comment blanked to a space.
+ *
+ * ## Why this is not a nicety
+ *
+ * sclang has TWO string delimiters, `"` and `'`, and `'x'` is a single-character
+ * string. Prose in a comment therefore contains string delimiters: a comment that
+ * says "a gong's modes are not harmonic" opens an apostrophe string that never
+ * closes, and any scanner walking the source for balanced parentheses then runs to
+ * the end of the file and gives up. Measured: that one apostrophe made the tap
+ * below refuse an example whose parentheses were perfectly balanced, and the error
+ * it produced was "could not rewrite that SynthDef", which points at the wrong
+ * thing entirely.
+ *
+ * Blanking rather than deleting keeps every offset and line number identical, so a
+ * caller can locate things here and slice the real text from the original.
+ *
+ * @param text - sclang source.
+ * @returns the same text with comment content replaced by spaces.
+ */
+function blankComments(text) {
+  const source = String(text ?? '')
+  const out = source.split('')
+  let index = 0
+  let quote = null
+  while (index < source.length) {
+    const char = source[index]
+    const next = source[index + 1]
+    if (quote !== null) {
+      if (char === '\\') index += 2
+      else {
+        if (char === quote) quote = null
+        index += 1
+      }
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      index += 1
+      continue
+    }
+    if (char === '/' && next === '/') {
+      while (index < source.length && source[index] !== '\n') {
+        out[index] = ' '
+        index += 1
+      }
+      continue
+    }
+    if (char === '/' && next === '*') {
+      out[index] = ' '
+      out[index + 1] = ' '
+      index += 2
+      while (index < source.length && !(source[index] === '*' && source[index + 1] === '/')) {
+        if (source[index] !== '\n') out[index] = ' '
+        index += 1
+      }
+      if (index < source.length) {
+        out[index] = ' '
+        out[index + 1] = ' '
+        index += 2
+      }
+      continue
+    }
+    index += 1
+  }
+  return out.join('')
+}
+
+/**
+ * Rewrite a `SynthDef(...)` expression so its own `Out.ar` output is TAPPED and
+ * recorded into a buffer, without touching the caller's text.
+ *
+ * ## Why not a bus
+ *
+ * The obvious way to measure a sound is to record the bus it writes to. That was
+ * tried and it does not work reliably: on the development host, a recorder node
+ * reading a private bus that another node demonstrably wrote to captured exact
+ * zeros, while `RecordBuf.ar` of an oscillator inside the same node captured the
+ * signal perfectly. Bus read-back depends on the server's bus wiring and its
+ * device, so a measurement built on it reports **SILENT** for a sound that is
+ * playing — the worst possible failure for a tool whose whole purpose is to tell
+ * the truth about a sound.
+ *
+ * So the tap is made where the signal is made. The expression is rewritten to
+ *
+ *     SynthDef(\name, { |out = 0, …, |recBuf = 0, recSeconds = 3|
+ *         RecordBuf.ar(Out.ar(out, <the original body>), recBuf, loop: 0);
+ *         Line.kr(0, 1, recSeconds, doneAction: 2);
+ *         Silent.ar(2) })
+ *
+ * `Out.ar`'s return value is its input, so recording it records exactly what the
+ * def sends to the output, and the def still plays normally. The original text is
+ * left alone: only the `Out` calls are wrapped, and `recBuf` 0 means "record
+ * nothing", so a def built this way is harmless if it is played directly.
+ *
+ * @param source - a complete `SynthDef(...)` expression.
+ * @param rename - the name to register the instrumented copy under. Looked up
+ *   from the source when absent, which is only safe when the source's own name
+ *   is a plain identifier; callers that already know the name should pass it.
+ * @returns the rewritten expression, or null when it cannot be rewritten.
+ */
+export function tapSynthDefSource(source, rename) {
+  const text = String(source ?? '')
+  // Comments are blanked before anything is scanned. sclang's `'x'` is a
+  // single-character STRING, so prose in a comment ("a gong's modes are not
+  // harmonic") opens a string that never closes and every parenthesis walk after
+  // it is nonsense. Offsets are preserved, so the body is still sliced out of the
+  // original text below.
+  const scan = blankComments(text)
+  const call = /\bSynthDef\s*\(/.exec(scan)
+  if (call === null) return null
+  const name = rename === undefined || rename === null ? declaredSynthDefName(text) : String(rename)
+  if (name === null || name === '') return null
+
+  // The matching close paren of the SynthDef call, by depth rather than by regex:
+  // the body is full of parens and a greedy match would swallow the rest.
+  const open = call.index + call[0].length - 1
+  let depth = 0
+  let close = -1
+  let quote = null
+  for (let index = open; index < scan.length; index += 1) {
+    const char = scan[index]
+    if (quote !== null) {
+      if (char === '\\') index += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char === '(') depth += 1
+    else if (char === ')') {
+      depth -= 1
+      if (depth === 0) {
+        close = index
+        break
+      }
+    }
+  }
+  if (close < 0) return null
+
+  const inner = text.slice(open + 1, close)
+  const innerScan = scan.slice(open + 1, close)
+  // `SynthDef(\name, { |args| body })` — keep the name, take the function. The
+  // shape is read from the blanked text so a comment cannot look like the name.
+  const argument = /^\s*(?:\\(?:[A-Za-z_][A-Za-z0-9_]*)|'[^']*'|"[^"]*")\s*,/.exec(innerScan)
+  if (argument === null) return null
+  const fn = inner.slice(argument[0].length).trim()
+  const fnScan = innerScan.slice(argument[0].length).trim()
+  const brace = /^\{\s*(?:\|([^|]*)\|)?/.exec(fnScan)
+  if (brace === null) return null
+
+  let body = fn.slice(brace[0].length)
+  body = body.replace(/\s*\}\s*$/, '')
+  let bodyScan = fnScan.slice(brace[0].length)
+  bodyScan = bodyScan.replace(/\s*\}\s*$/, '')
+  const closed = closeRecordedOuts(bodyScan, body)
+  if (closed === null) return null
+
+  const args = (brace[1] ?? '').trim()
+  const withRecorder = (args === '' ? '' : args.replace(/,\s*$/, '') + ', ') + 'recBuf = 0, recSeconds = 3'
+  return (
+    'SynthDef(\\' + name + ', { |' + withRecorder + '| ' +
+    // The original body becomes a FUNCTION, called with the record buffer. That
+    // is what allows a `var` to be introduced at all: sclang only accepts one at
+    // the top of a function body, and the caller's body may already have its own
+    // `var`s that must stay first. `dshOut` is that function's argument, so the
+    // caller's text is untouched.
+    '{ |dshOut| ' + closed.body + ' }.value(recBuf); ' +
+    'Line.kr(0, 1, recSeconds, doneAction: 2); ' +
+    'Silent.ar(2) })'
+  )
+}
+
+/**
+ * Route every `Out.ar(` in a SynthDef body through a `RecordBuf`, so the exact
+ * signal the def emits is what gets measured.
+ *
+ * ## What does NOT work, measured on scsynth 3.14.1
+ *
+ * Every one of these compiles and runs, and every one of them captured exact
+ * silence while the sound was demonstrably playing:
+ *
+ *   - `RecordBuf.ar(Out.ar(bus, sig), buf)` — `Out.ar` expands, so `RecordBuf.ar`
+ *     is instantiated once per channel and the last wins;
+ *   - `.dup`-ing the signal first — captured values of `1e32`, i.e. garbage;
+ *   - `Out.ar(bus, sig, recBuf)` — the documented "record to this buffer" third
+ *     argument, which recorded nothing at all on this install;
+ *   - a second node reading the bus the sound writes to (`In.ar(bus)`), including
+ *     a private bus, which read silence.
+ *
+ * The only form that captured the signal was calling `RecordBuf.ar` **directly on
+ * the signal**, in the same node that produces it. That is what this builds:
+ *
+ *     Out.ar(bus, sig)   becomes   Out.ar(bus, RecordBuf.ar(sig, dshOut, loop: 0))
+ *
+ * `recBuf = 0` makes `RecordBuf` a pass-through, so the rewritten copy is harmless
+ * if it is ever played directly, and the def still plays normally.
+ *
+ * @param body - the SynthDef function's body.
+ * @param original - the same body with its comments intact. Positions are located
+ *   in the comment-blanked copy and sliced out of this one, so a comment can never
+ *   be mistaken for code while the emitted text keeps everything the author wrote.
+ * @returns `{ body }`, or null when an `Out.ar` call cannot be rewritten.
+ */
+function closeRecordedOuts(body, original = body) {
+  const out = []
+  let index = 0
+  const needle = 'Out.ar('
+  while (index < body.length) {
+    const found = body.indexOf(needle, index)
+    if (found < 0) {
+      // Everything between and after the tapped calls comes from the ORIGINAL, so
+      // the author's comments and formatting survive the rewrite.
+      out.push(original.slice(index))
+      break
+    }
+    out.push(original.slice(index, found))
+    // Walk forward from just after `Out.ar(` to its matching `)`.
+    let depth = 1
+    let cursor = found + needle.length
+    let quote = null
+    while (cursor < body.length) {
+      const char = body[cursor]
+      if (quote !== null) {
+        if (char === '\\') cursor += 1
+        else if (char === quote) quote = null
+        cursor += 1
+        continue
+      }
+      if (char === '"' || char === "'") {
+        quote = char
+        cursor += 1
+        continue
+      }
+      if (char === '(') depth += 1
+      else if (char === ')') {
+        depth -= 1
+        if (depth === 0) break
+      }
+      cursor += 1
+    }
+    if (depth !== 0) return null
+    // Positions come from the blanked copy; the text itself is sliced out of the
+    // original so the emitted def keeps the author's own formatting and comments.
+    const inside = original.slice(found + needle.length, cursor)
+    // Split `bus, signal` at the first top-level comma: the bus expression may
+    // itself contain commas inside a call (`Pan2.ar(sig, pan)`), so depth matters.
+    //
+    // `Out.ar(sig)` — one argument is a legal MONO emission to bus 0, and it has no
+    // comma at all. It is also exactly what the feedback example writes, so this
+    // has to handle it rather than refuse the def.
+    const split = splitTopLevel(inside)
+    const bus = split === null ? '0' : split.first
+    const signal = split === null ? inside : split.rest
+    if (signal.trim() === '') return null
+    // The recorded signal is forced to exactly two channels. A mono signal into a
+    // two-channel buffer captures silence — measured: `RecordBuf.ar(SinOsc.ar(400)
+    // * 0.3, buf)` into a stereo buffer gave peak 0.0000 while the same call with
+    // `SinOsc.ar([400, 500])` gave 0.3000. The measurement buffer is always stereo,
+    // so the signal is made to match it: one channel is duplicated, more than two
+    // are summed, which is what `analyse` expects.
+    out.push(
+      'Out.ar(' + bus + ', { |dshSig|' +
+      ' if(dshSig.numChannels == 1) { RecordBuf.ar(dshSig.dup, dshOut, loop: 0) }' +
+      ' { if(dshSig.numChannels == 2) { RecordBuf.ar(dshSig, dshOut, loop: 0) }' +
+      ' { RecordBuf.ar(dshSig.sum.dup, dshOut, loop: 0) } } }.value(' + signal + '))',
+    )
+    index = cursor + 1
+  }
+  const joined = out.join('')
+  const opens = (joined.match(/\(/g) ?? []).length
+  const shuts = (joined.match(/\)/g) ?? []).length
+  if (opens !== shuts) return null
+  // A body that never reaches `Out.ar` produces no sound, so there is nothing to
+  // measure. Without this the tap returns a valid-looking def that records
+  // silence, and the tool reports SILENT for an instrument that simply has no
+  // output — a confusing answer to a question nobody asked.
+  if (!joined.includes('RecordBuf.ar(')) return null
+  return { body: joined }
+}
+
+/**
+ * Split an argument list at its first top-level comma.
+ *
+ * @param text - the arguments of a call, without the surrounding parens.
+ * @returns `{ first, rest }`, or null when there is no top-level comma.
+ */
+function splitTopLevel(text) {
+  let depth = 0
+  let quote = null
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]
+    if (quote !== null) {
+      if (char === '\\') index += 1
+      else if (char === quote) quote = null
+      continue
+    }
+    if (char === '"' || char === "'") {
+      quote = char
+      continue
+    }
+    if (char === '(' || char === '[' || char === '{') depth += 1
+    else if (char === ')' || char === ']' || char === '}') depth -= 1
+    else if (char === ',' && depth === 0) {
+      return { first: text.slice(0, index).trim(), rest: text.slice(index + 1).trim() }
+    }
+  }
+  return null
+}
+
+/** The name the instrumented copy of a measured def is registered under. */
+function measuredName(name) {
+  const base = String(name ?? 'measured')
+  return (base + '_measured').slice(0, 60)
+}
 
 /** The first line of a snippet, for a card title. */
 function firstLine(code) {
   const text = String(code ?? '').trim().split('\n')[0] ?? ''
   return text.length > 60 ? text.slice(0, 57) + '…' : text
+}
+
+/**
+ * The name a `SynthDef(...)` expression declares.
+ *
+ * Read from the source because it is the only name the server will answer to:
+ * `SynthDef(\foo, { ... })` registers a def called `foo`, whatever file it was
+ * compiled into and whatever the caller hoped to call it. A tool that invents its
+ * own node name instead gets `FAILURE IN SERVER /s_new SynthDef not found` while
+ * every step in front of it reports success.
+ *
+ * Accepts the three spellings sclang allows for the name: `\foo`, `'foo'` and
+ * `"foo"`.
+ *
+ * @param source - the SynthDef expression.
+ * @returns the name, or null when the source does not declare one.
+ */
+export function declaredSynthDefName(source) {
+  const text = String(source ?? '')
+  const call = /\bSynthDef\s*\(/.exec(text)
+  if (call === null) return null
+  const rest = text.slice(call.index + call[0].length)
+  const argument = /^\s*(?:\\([A-Za-z_][A-Za-z0-9_]*)|'([^']*)'|"([^"]*)")/.exec(rest)
+  if (argument === null) return null
+  const name = argument[1] ?? argument[2] ?? argument[3] ?? ''
+  return name === '' ? null : name
 }
 
 /** A one-line reason, for a card summary. */
