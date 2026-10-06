@@ -1,0 +1,46 @@
+{
+  "name": "dsh-supercollider",
+  "version": "0.1.0-alpha.1",
+  "description": "SuperCollider for the agent: ten sc_* tools that boot the audio server, compile and load SynthDefs and rewrite a patch while it sounds, five bundled skills that teach the language and the live-coding workflow, and a deliberately small console tab. Zero npm dependencies and no MCP server - one long-lived sclang session and a hand-written OSC client to scsynth.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./engine": "./lib/engine/session.js",
+    "./engine/osc": "./lib/engine/osc.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-supercollider-mcp": "./mcp/stdio.js"
+  },
+  "files": [
+    "lib",
+    "skills",
+    "mcp",
+    "checks",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "check:node": "node checks/check-sc-node.mjs",
+    "check:examples": "node checks/check-sc-examples.mjs",
+    "check:wiring": "node checks/check-sc-wiring.mjs",
+    "check": "node checks/check-sc-node.mjs && node checks/check-sc-wiring.mjs && node checks/check-sc-examples.mjs",
+    "mcp": "node mcp/stdio.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "dsh-rightbar"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

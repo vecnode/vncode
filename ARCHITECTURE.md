@@ -49,6 +49,7 @@ disable/replace a core row **in its own layer** — a later layer wins per row.
 | `dsh-audio` | `audio` | waveform tab (WAV/AIFF/FLAC) + the Audio console (devices, routing, test tone) |
 | `dsh-video` | `video` | video player tab; the bytes stay on the host and stream through a Range route |
 | `dsh-media` | `media` | the pack's ffmpeg owner: `media_probe` / `media_run` / `media_frames`, the Range file route, remux jobs |
+| `dsh-supercollider` | `supercollider` | SuperCollider the agent can play: ten `sc_*` tools over one warm `sclang` session (~31 ms a call, state kept) and a hand-written OSC client to `scsynth`, the installed `.schelp` reference indexed for `sc_help`, the `.scd` file workflow, five skills whose every example is compiled by a check, and one small console tab |
 | `dsh-diagrams` | `diagrams` | Mermaid + TikZ surfaces and the six `diagram_*` tools, validated on the host |
 | `dsh-pdf` | `pdf` | PDF reader tab + `pdf_info` / `pdf_read` / `pdf_find` / `pdf_render` / `pdf_scan` over vendored pdf.js |
 | `dsh-canvas` | `canvas` | Canvas tab: a JSON design language, a browser painter, PNG export |

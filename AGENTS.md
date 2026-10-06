@@ -56,11 +56,20 @@ for its behaviour, `SECURITY.md` before touching credentials or the launcher, an
   one-page README: `dsh-vn-master` (final layer), `dsh-rightbar` +
   `dsh-rightbar-files` (the right bar and its Files tab), `dsh-editor`,
   `dsh-gittree` (History), `dsh-image`, `dsh-audio`, `dsh-video`, `dsh-media`
-  (the only owner of ffmpeg), `dsh-diagrams`, `dsh-pdf`, `dsh-canvas`,
+  (the only owner of ffmpeg), `dsh-supercollider` (SuperCollider: ten `sc_*` tools
+  over a warm `sclang` session and a hand-written OSC client, the `.schelp`
+  reference indexed, five skills whose every example a check compiles, one small
+  console tab — host half plus UI, no bundled binary), `dsh-diagrams`, `dsh-pdf`,
+  `dsh-canvas`,
   `dsh-writing` (the Writing tab, the pack's only `.docx` codec and its only
   method skill — `research`, the one that teaches a practice rather than a tool),
   `dsh-browser`, `dsh-themes`, `dsh-cmdbar`, `dsh-modal`, `dsh-skills`,
   `dsh-ui-state`, `dsh-open-in-app`.
+- A package may carry its OWN checks under `packages/<name>/checks/`, run with
+  `npm run check` in that folder. They travel with the package (which is what
+  makes them useful outside this repository) and they are ADDITIONAL to
+  `scripts/checks/`, never a replacement for it: `dsh-supercollider` ships three,
+  and the pack-wide checks still own the routes, the bundle and the manifest.
 - `scripts/` — the launchers, the installer workers, the shared console layer and
   `scripts/checks/`.
 - `app/` — the Rust/Tauri launcher window (a launcher, not a desktop edition).
@@ -84,7 +93,13 @@ Run the check that owns the area, and say which ones you ran:
   `check-canvas-browser.mjs`, `check-audio-browser.mjs` — the checks that drive a
   real browser (with none installed they skip loudly);
 - `check-skill-examples.mjs`, `check-media-examples.mjs` — every fenced example in
-  the shipped skills (parsed, compiled, or actually run).
+  the shipped skills (parsed, compiled, or actually run);
+- `npm run check` **in a package folder that ships its own** — today
+  `packages/dsh-supercollider`, whose three checks cover the engine's OSC codec
+  and discovery, the skill examples against a real SuperCollider, and the row's
+  own contract (ten tools, three routes, five skills, the classic-script client
+  bundle and its CSS prefix). They are additional to the list above, not a
+  substitute for it.
 
 A check that cannot run on this host says so loudly and exits 0. Never silence a
 check, and never weaken one to make a change pass.

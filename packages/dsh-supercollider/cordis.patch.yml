@@ -1,0 +1,20 @@
+# dsh-supercollider bundle layer (alpha).
+#
+# One row ('supercollider') owns the whole package: the ten agent tools built in
+# lib/tools.js, the five bundled skills, one long-lived sclang session and the
+# OSC client that talks to scsynth, the three host routes the console tab reads,
+# and the console tab itself.
+#
+# Nothing shipped is patched and no core row is disabled, so there is no
+# `disabled: true` here and nothing for scripts/sync-vendored.ps1 to keep in
+# sync: this package is hand-written and forks nothing.
+#
+# The one surface it SUPERSEDES it supersedes by REGISTRATION, not by disabling:
+# the bar's tab registry ranks a type in the `extension` band above the shipped
+# document preview's `fallback` band, so a `*.scd` (or `*.sc`) address opens in
+# the pack's code editor, which is the right surface for a SuperCollider piece.
+# Every other file type keeps exactly the surface it had, and the shipped preview
+# stays mounted as the fallback for anything this package does not claim.
+- insert:
+    - id: supercollider
+      name: 'dsh-supercollider'
