@@ -26,7 +26,7 @@
         "mono": "system"
       },
       "scale": {
-        "display": 160,
+        "display": 140,
         "title": 40,
         "body": 22,
         "caption": 16
@@ -54,7 +54,7 @@
         "id": "wordmark",
         "x": 64,
         "y": 208,
-        "w": 1152,
+        "w": "hug",
         "text": "Fieldnotes",
         "style": "display",
         "family": "display",

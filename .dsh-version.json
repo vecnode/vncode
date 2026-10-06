@@ -116,7 +116,7 @@
       ]
     },
     "dsh-supercollider": {
-      "version": "0.1.0-alpha.2",
+      "version": "0.1.0-alpha.3",
       "rows": [
         "supercollider"
       ],
@@ -287,12 +287,12 @@
       "vendoredPatches": 2
     },
     "dsh-canvas": {
-      "version": "0.1.0-alpha.14",
+      "version": "0.1.0-alpha.15",
       "rows": [
         "canvas"
       ],
       "rowOverrides": [],
-      "role": "Canvas: a design page the agent drives - eleven `canvas_*` tools over a small JSON design language validated on the host and painted by the browser, exported at preset sizes, with a style library, presets, archetypes and an asset store. See packages/dsh-canvas/README.md.",
+      "role": "Canvas: a design page the agent drives - twelve `canvas_*` tools over a small JSON design language validated on the host and painted by the browser, exported at preset sizes, with a style library, presets, archetypes and an asset store. See packages/dsh-canvas/README.md.",
       "uses": [
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-session",

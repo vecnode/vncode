@@ -41,7 +41,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { ENGINE_VERSION, LIMITS, applyPatches, clone, normalizeDocument } from './engine.js'
+import { ENGINE_VERSION, LIMITS, applyPatches, clone, layout, normalizeDocument } from './engine.js'
 import { PRESETS, exportProblems, presetById } from './presets.js'
 import { FONT_ROUTE_PREFIX, fontFileFor, fontStatus, fontTable } from './fonts.js'
 import { ARCHETYPES, archetypeById } from './archetypes/index.js'
@@ -51,6 +51,7 @@ import { SETS, deriveFor, deriveSet, setById, setGallery } from './sets.js'
 import { AssetStore, CanvasStore, ID_PATTERN, SCOPES, MAX_ASSET_BYTES, MAX_DOCUMENT_BYTES, renderPath, resolveHome, summarize, verificationOf } from './store.js'
 import { desktopDirectory, humanBytes, resolveNewInside, sanitizeName, writeCreateExclusive } from './export.js'
 import { hostRenderStatus, renderOnHost } from './host-render.js'
+import { GATE_VERSION, auditDesign, auditLines } from './gate.js'
 
 export const name = 'dsh-canvas'
 
@@ -104,10 +105,22 @@ const MAX_EXPORT_BYTES = 48 * 1024 * 1024
 const SKILL_FILES = [
   { name: 'canvas-design', file: '../skills/canvas-design/SKILL.md' },
   { name: 'social-banners', file: '../skills/social-banners/SKILL.md' },
+  // THE DESIGN SKILLS. Each one exists to stop a specific failure:
+  //
+  //   - canvas-banner: a banner designed without its destination, or styled before its
+  //     words were written;
+  //   - canvas-house-edit: a house design REWRITTEN when patching it was the job, and a
+  //     design called finished on a gate it never passed.
+  //
+  // They are four rather than one because a skill is read when it applies: a single file
+  // covering composition, destinations, editing and review is a file the model skims in
+  // the middle of a patch.
+  { name: 'canvas-banner', file: '../skills/canvas-banner/SKILL.md' },
+  { name: 'canvas-house-edit', file: '../skills/canvas-house-edit/SKILL.md' },
 ]
 
 /** Every tool name, in the order the conversation cards register. */
-export const TOOL_NAMES = ['canvas_new', 'canvas_write', 'canvas_patch', 'canvas_read', 'canvas_style', 'canvas_set', 'canvas_publish', 'canvas_delete', 'canvas_render', 'canvas_export', 'canvas_assets']
+export const TOOL_NAMES = ['canvas_new', 'canvas_write', 'canvas_patch', 'canvas_read', 'canvas_style', 'canvas_set', 'canvas_publish', 'canvas_delete', 'canvas_render', 'canvas_export', 'canvas_assets', 'canvas_audit']
 // The unattended renderer is part of the row's interface, not an implementation
 // detail: a check, the health route and a person all need to ask this machine whether
 // a render can happen with no page open.
@@ -719,6 +732,26 @@ function lintLines(lints, limit = 12) {
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
+
+/**
+ * A text measurer WITHOUT a browser, for the audit tool.
+ *
+ * The engine never measures anything itself, and the browser's `measureText` is the
+ * real thing - so why have a second one? Because `canvas_audit` is the tool that has
+ * to work with no page open and no render: it scores a design the moment it is patched,
+ * and a browser round trip to ask "are the words too long?" would make the gate cost
+ * more than the render it is meant to precede.
+ *
+ * The arithmetic is the one every check in this package already measures with - half
+ * the font size a character, which is the average of the built faces at these weights -
+ * and it is honest about being an average: `canvas_audit` says so, and a BORDERLINE
+ * overflow is worth confirming with `canvas_render`, which measures real glyphs.
+ */
+function canvasMeasurer() {
+  const measure = (text, font) => String(text ?? '').length * ((font && font.size ? font.size : 16) * 0.5)
+  measure.metrics = () => ({ ascent: 0.8, descent: 0.2 })
+  return measure
+}
 
 /**
  * The nine tool definitions.
@@ -1534,7 +1567,90 @@ export function buildTools(row, ctx) {
     },
   }
 
-  return [newDesign, write, patch, read, restyle, designSet, publish, remove, render, exportTool, assets]
+  // -------------------------------------------------------------------------
+  // canvas_audit
+  //
+  // THE GATE AS A TOOL. lintLayout needs a LAYOUT, and a real one needs a browser's
+  // metrics - so the host lays the design out with the same arithmetic the package's
+  // own checks use (0.5em an average glyph, the engine's own wrapping) and says so:
+  // the numbers are an ESTIMATE, the codes are not. A design the gate fails is a design
+  // that will fail the render too, and a person does not have to look at it to know.
+  // -------------------------------------------------------------------------
+  const audit = {
+    name: 'canvas_audit',
+    description: [
+      'Score a design against THE PERFECT GATE: the objective checks this package holds every house design to - the engine\u2019s own lints, the 2:1 type ratio, the destination\u2019s word budget, and a single focal point.',
+      'Run it on a design you have just patched before you render it, and on a design whose render looked wrong but whose lints were empty. It answers the question "is this finished?" with a code, not an opinion - and it costs nothing, because it lays the design out with the same engine the browser uses and needs no page open.',
+      'The type metrics it measures with are the package\u2019s own average rather than a real font: a borderline TEXT_OVERFLOW verdict is worth confirming with canvas_render, which measures with the browser\u2019s own faces.',
+    ].join('\n'),
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        id: ID_SCHEMA,
+        example: { type: 'string', description: 'A house example id to audit instead of a stored design; canvas_read lists them.' },
+        scope: SCOPE_SCHEMA,
+      },
+    },
+    output: {
+      schema: { type: 'object', properties: { text: { type: 'string' }, view: VIEW_SCHEMA }, required: ['text'] },
+      render: (_args, value) => [{ type: 'text', text: value.text }],
+      presentationMeta: (_args, value) => (value.view && value.view.id ? value.view : {}),
+    },
+    presentCall: (args) => callView(args, 'Audit'),
+    presentResult: resultView,
+    execute(args, exec) {
+      const sessionId = sessionOf(exec)
+      // An example first: it is the thing the model is told to EDIT, so scoring it by
+      // name is the commonest call and it needs no stored design.
+      let source = null
+      let label = null
+      let scopeKey = keyFor(sessionId, args.scope)
+      if (typeof args.example === 'string' && args.example.length > 0) {
+        const example = exampleById(args.example)
+        if (!example) {
+          return { text: 'Unknown example ' + JSON.stringify(args.example) + '. The gallery carries:\n' + exampleLines() }
+        }
+        const verdict = validateDocument(row, example.document)
+        if (!verdict.document) {
+          return { text: 'The house example did not validate (this is a bug in the gallery, not in your call):\n' + problemLines(verdict.problems) }
+        }
+        source = verdict.document
+        label = 'example "' + example.id + '"'
+      } else if (typeof args.id === 'string' && args.id.length > 0) {
+        const found = requireDesign(sessionId, args.id, args.scope)
+        source = found.entry.document
+        label = '"' + found.entry.id + '"'
+        scopeKey = found.scopeKey
+      } else {
+        return { text: 'Give canvas_audit either "id" (a stored design) or "example" (a house example).' }
+      }
+
+      const preset = source.preset ? presetById(source.preset) : null
+      const measurer = canvasMeasurer()
+      let laid = null
+      let failure = null
+      try {
+        laid = layout(source, { measure: measurer, assets: row.assets.table ? row.assets.table() : {}, fonts: fontTable() })
+      } catch (err) {
+        failure = message(err)
+      }
+      const report = auditDesign({ layoutResult: laid, document: source, preset, problems: [], assets: {} })
+      const lines = [
+        (report.perfect ? 'PERFECT: ' : 'NOT PERFECT: ') + label + (preset ? ' at ' + preset.id : ' (no preset)') + ' against gate v' + GATE_VERSION + '.',
+        failure ? 'The layout could not be produced, so the checks below could not all run: ' + failure : null,
+        auditLines(report),
+        report.failed.length === 0
+          ? 'Nothing to fix. The next thing that can fail is the picture: render it and LOOK.'
+          : 'Fix ' + report.failed.join(' + ') + ' and audit again before rendering.',
+        'The type metrics are the package\u2019s own average; canvas_render measures with the browser\u2019s real faces and is the authority on overflow.',
+      ].filter(Boolean)
+      const view = typeof args.id === 'string' && args.id.length > 0 ? viewOf(scopeKey, { id: args.id, title: args.id, preset: source.preset, revision: 0 }) : null
+      return { text: lines.join('\n'), view }
+    },
+  }
+
+  return [newDesign, write, patch, read, restyle, designSet, publish, remove, render, exportTool, assets, audit]
 }
 
 /**

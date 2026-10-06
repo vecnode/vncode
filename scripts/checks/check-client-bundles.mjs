@@ -2970,6 +2970,58 @@ check(
   )
 }
 
+// ------------------------------------------------------- dsh-supercollider
+// The console tab. It was the pack's one bundle with NO section here: the
+// `sidebarRightTabs.register` call copies a `guide` entry verbatim and the bar's
+// guide body calls `entry.title()` and `entry.description?.()` while it draws the
+// capsule, so a capsule written with `label` and a plain string threw inside the
+// START PAGE'S own render - and the slots core abdicates the entry a render crashed
+// in, so the Start tab drew nothing while its chip stayed. Nothing here loaded this
+// bundle, so nothing called those fields. The two calls are made below, from the
+// pack-wide check that owns every browser bundle, and the package's own
+// `check-sc-wiring.mjs` pins the same contract where it travels.
+{
+  const sc = loadBundle('packages/dsh-supercollider/lib/client.js', {})
+  check('supercollider bundle id', sc.id, 'dsh-supercollider')
+  check('supercollider inject', JSON.stringify(sc.exports.inject), '["slots","sidebarRightTabs"]')
+  const scCssTag = sc.document.head.children.filter((tag) => tag.dataset && tag.dataset.pluginCss === 'dsh-supercollider/console.css').pop()
+  const scCss = scCssTag ? scCssTag.textContent : ''
+  check('supercollider stylesheet injected', scCss.includes('.dsu-console{') && scCss.includes('.dsu-in input{'))
+  const scTypes = []
+  const scSeats = {}
+  sc.exports.apply({
+    slots: {
+      inject: (name, fn) => fn(),
+      register(spec, component) {
+        scSeats[spec.name + (spec.key ? '#' + spec.key : '')] = { spec, component }
+        return () => {}
+      },
+    },
+    sidebarRightTabs: { register: (definition) => (scTypes.push(definition), () => {}), entries: () => [] },
+    effect: (fn) => fn(),
+    logger: { debug() {}, warn() {} },
+  })
+  check('supercollider type registered', scTypes.length === 1 && scTypes[0].id + '/' + scTypes[0].kind, 'dsh-supercollider/dsh-supercollider')
+  check('supercollider claims a piece, not a text file', scTypes[0].canOpen('pieces/drone.scd') && scTypes[0].canOpen('notes.txt') === false, true)
+  // THE CAPSULE, CALLED - the two expressions the Start page evaluates.
+  const scCapsule = (scTypes[0].guide ?? [])[0] ?? {}
+  check(
+    'supercollider guide capsule answers the Start page',
+    typeof scCapsule.title === 'function' && typeof scCapsule.description === 'function' && scCapsule.title() === 'SuperCollider console' && scCapsule.description().length > 0 && Number.isFinite(scCapsule.order),
+  )
+  check('supercollider capsule carries no bare `label`', scCapsule.label === undefined, true)
+  check(
+    'supercollider seats',
+    Object.keys(scSeats).sort().join(','),
+    'sidebar.right.pane.tab#dsh-supercollider,sidebar.right.pane.tab.title#dsh-supercollider',
+  )
+  const scTitle = scSeats['sidebar.right.pane.tab.title#dsh-supercollider'].component
+  const scBody = scSeats['sidebar.right.pane.tab#dsh-supercollider'].component
+  check('supercollider title seat renders', renderToStaticMarkup(h(scTitle)).includes('SuperCollider'))
+  const scMarkup = renderToStaticMarkup(h(scBody))
+  check('supercollider console renders its frame', scMarkup.includes('class="dsu-console"') && scMarkup.includes('sclang — Enter to send') && scMarkup.includes('>Stop<'))
+}
+
 // -------------------------------------------------------------- dsh-browser
 // The Browser tab, and the REPLACEMENT for the shipped iframe one. This bundle
 // is hand-written (no generated fork), so these are source-level pins on the two
@@ -6074,6 +6126,48 @@ check('the settled card shows the host text', settledCard.includes('Wrote /tmp/l
 // tab still answers a render request).
 check('the renderer is started by the plugin, not the tab', canvasEffects.length >= 11, true)
 const canvasSource = readFileSync(path.join(repo, 'packages/dsh-canvas/lib/client.js'), 'utf8')
+// THE TEMPLATE TRAP, in the browser half this time. `lib/client.js` keeps its whole
+// stylesheet in one backtick literal, and a real backtick INSIDE a CSS comment (easy
+// to type when the comment mentions a class) closes that literal early: the rest of
+// the sheet is then parsed as JavaScript, a class name like .cnv-pad becomes the
+// identifier `pad`, and the bundle loads and throws `pad is not defined` at RUNTIME.
+// `node --check` says the file is fine, because it is - it is the string that is
+// wrong, and the only outward sign is a tab that paints nothing.
+//
+// Two measurements, both on the source text. (1) The literal must close on a line
+// that is a backtick and nothing else, and no earlier unescaped backtick may appear
+// inside it. (2) The stylesheet the browser is handed must still END with the rules
+// that come last in the file: if it closed early, the tail of the sheet is missing
+// from the string even though the class names are still in the file.
+{
+  const cssOpen = canvasSource.indexOf('const CSS = `')
+  const bodyStart = cssOpen + 'const CSS = `'.length
+  const expectedClose = canvasSource.indexOf('\n`\n', bodyStart)
+  const body = cssOpen < 0 || expectedClose < 0 ? '' : canvasSource.slice(bodyStart, expectedClose)
+  const problems = []
+  if (cssOpen < 0) problems.push('the stylesheet literal was not found')
+  if (expectedClose < 0) problems.push('the stylesheet literal never closes on a line of its own')
+  let escaped = false
+  for (let index = 0; index < body.length; index += 1) {
+    const character = body[index]
+    if (escaped) {
+      escaped = false
+      continue
+    }
+    if (character === '\\') {
+      escaped = true
+      continue
+    }
+    if (character === '`') {
+      problems.push('an unescaped backtick at offset ' + index + ' closes the literal early')
+      break
+    }
+  }
+  check('the canvas stylesheet literal closes where the layout says', problems.join(', '), '')
+  // The last rule in the file has to be in the string the browser gets. This is the
+  // consequence, stated as the thing a person would SEE: a truncated sheet.
+  check('the stylesheet reaches its own last rule', canvasCss.includes('.cnv-hidden{display:none}'), true)
+}
 check('the bundle has no build-time eval', /new Function\(|eval\(/.test(canvasSource.replace(/\/\/.*$/gm, '')) === false, true)
 check('the bundle polls the queue for ANY session', canvasSource.includes("QUEUE_ROUTE + '?session=*&wait='"), true)
 check('the bundle fetches the engine from the host route', canvasSource.includes('ENGINE_ROUTE'), true)
@@ -6288,14 +6382,43 @@ check('the transform dress is styled', canvasCss.includes('.cnv-nudgeRow{') && c
 // inset of its own, and the clearance variable is not what draws it.
 check('the artboard keeps a gap over the composer', canvasCss.includes('padding:10px 10px calc(var(--cnv-composer-clearance,168px) + 10px) 10px'), true)
 check('the page reserves the composer clearance', canvasCss.includes('--cnv-composer-clearance:calc(var(--dsh-composer-height,152px) + 16px)'), true)
-// THE RULERS AND THE ORIGIN: the page's coordinate system, drawn. The gutters are grid
-// tracks - the ONLY horizontal inset on the left - so design x=0 is the artboard's own
-// left edge, which is what makes the origin marker the origin.
-check('the page is a ruler gutter around the artboard', canvasCss.includes('.cnv-pad{min-width:100%;min-height:100%;display:grid;grid-template-columns:22px 1fr;grid-template-rows:22px 1fr'), true)
-check('both rulers exist', canvasCss.includes('.cnv-axisTop{') && canvasCss.includes('.cnv-axisLeft{'), true)
+// THE PAGE'S COORDINATE SYSTEM, drawn without a gutter. The stage used to carry a
+// 22px ruler on the top and the left, with the artboard in the corner they met at. The
+// rulers are gone (they cost 44px of the pane at every zoom for numbers the transform
+// controls already print) and the stage now draws a 16px GRID instead, so the space
+// behind the artboard still gives the eye a scale. The design's own origin is still on
+// the artboard, which is what makes the origin marker the origin.
+//
+// THE TRACK IS minmax(0,1fr) AND THE ITEMS ARE CENTRED. The artboard used to sit in the
+// 1fr half of a `22px 1fr` pair and filled it, because the fit that sized it was
+// computed from the stage's own bounding rect - padding included. It is now a single
+// definite track sized to the pane's content box, with a fit that reserves a margin of
+// SCREEN pixels, so a fresh tab shows the design as a page on a workspace rather than
+// edge to edge.
+check('the stage is one centred track, not a ruler gutter',
+  /\.cnv-pad\{[^}]*grid-template-columns:minmax\(0,1fr\);grid-template-rows:minmax\(0,1fr\);align-items:center;justify-items:center/.test(canvasCss), true)
+check('the stage draws the 16px grid',
+  canvasCss.includes('radial-gradient(circle at 1px 1px,rgba(148,163,184,.26) 1px,transparent 1.4px)') && canvasCss.includes('background-size:64px 64px,64px 64px,16px 16px'), true)
+// A GRID BUILT FROM A THEME VARIABLE IS A GRID THAT CAN VANISH. `color-mix(in srgb,
+// var(--x) 13%, transparent)` resolves to transparent wherever the host does not define
+// that variable - which is every check page and every profile without the token - and
+// the whole declaration is then dropped. The rule colour is a literal.
+check('the grid colour does not depend on a host token',
+  /\[data-canvas-stage\]\{background-image:linear-gradient\(to right,rgba\(/.test(canvasCss) && /\[data-canvas-stage\]\{[^}]*color-mix/.test(canvasCss) === false, true)
+// WHICH ELEMENT CARRIES WHAT, and it is two: the OUTER stage is the scroller, and the
+// PAGE inside it carries the attribute the grid is painted on. The old checkerboard was
+// styled on `.cnv-stage` alone, which was fine - but the grid also has to sit behind the
+// composer clearance band, and the page is the element that owns that inset.
+check('the grid is anchored to the element the layout really mounts',
+  canvasSource.includes("className: 'cnv-pad'") && canvasSource.includes("'data-canvas-stage': 'true'")
+    && canvasCss.includes('[data-canvas-stage]{background-image:') && canvasCss.includes('.cnv-stage{flex:1;min-width:0;min-height:0;overflow:auto'), true)
+// The absence is the assertion: the ruler's four class names, its tick and label
+// styles and its render call were the whole feature, and a tab that grows them back
+// is the regression this pins. A string check is enough here because the two browser
+// checks drive the same removal through the real DOM.
+check('no ruler is rendered and no label survives in the bundle',
+  canvasSource.includes('data-canvas-ruler') === false && canvasSource.includes('cnv-axisLabel') === false && canvasSource.includes('function Ruler') === false, true)
 check('the origin is marked on the artboard', canvasSource.includes("'data-canvas-origin': '0,0'") && canvasSource.includes("'data-canvas-origin-marker': 'true'"), true)
-check('the rulers are labelled in design pixels', canvasSource.includes('data-canvas-ruler') && canvasSource.includes('cnv-axisLabel'), true)
-check('the ruler spacing is chosen so labels do not collide', canvasSource.includes('candidate * Math.abs(scale) >= 64'), true)
 // SAVE confirms what the HOST holds rather than inventing a second writer: the design is
 // already persisted on every edit, so the button re-reads the state and reports the
 // revision - two writers for one document is how a document forks.

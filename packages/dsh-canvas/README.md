@@ -1,4 +1,4 @@
-# dsh-canvas (alpha.13)
+# dsh-canvas (alpha.15)
 
 **The Canvas tab: a design page the agent drives, in the chat panel's own view ring
 to the right of Trajectory.**
@@ -12,10 +12,19 @@ page answering within 20 s says so.
 
 ## What it adds
 
-- **Eleven tools**: `canvas_new`, `canvas_write`, `canvas_patch` (pointer ops, at
+- **Twelve tools**: `canvas_new`, `canvas_write`, `canvas_patch` (pointer ops, at
   most 64 a call), `canvas_read`, `canvas_style`, `canvas_set` (one design derived to
   several destinations), `canvas_publish`, `canvas_delete`, `canvas_render`,
-  `canvas_export`, `canvas_assets`.
+  `canvas_export`, `canvas_assets`, and `canvas_audit`.
+- **THE PERFECT GATE** (`lib/gate.js`, alpha.15): one function over a laid-out design
+  that scores it against five checks - the engine's own lints, the 2:1 type ratio, the
+  copy budget its own typography allows, and a single focal point. `canvas_audit` is that
+  function as a tool, so the model can score any design (or its own patch) with **no page
+  open**. All twelve house examples pass it, and `check-canvas-node.mjs` runs the whole
+  gallery through it: a starter that stops being perfect fails a check rather than a
+  person's eye. What the gate means is generated into
+  `skills/canvas-house-edit/reference/gate.md` and a check re-runs the generator, so the
+  document the model reads cannot drift from the contract the tool enforces.
 - **The document language**: `preset` (or an explicit `canvas`), `tokens` and
   `layers`; six node kinds (`frame`, `text`, `image`, `shape`, `art`, `svg`); a
   CANONICAL form (tokens resolved, defaults filled) and every refusal a code.
@@ -32,6 +41,13 @@ page answering within 20 s says so.
   imports (the browser imports it from a blob URL); the layout is pure with the
   text measurer **injected**, and one draw-op list feeds the canvas painter (which
   serves the artboard **and** the PNG export) and the SVG serializer.
+- **The stage is a drafting grid** (alpha.15), and the rulers are gone. The page used to
+  carry a 22px ruler gutter on the top and the left, which cost the artboard 44px of every
+  pane at every zoom for numbers the transform controls already print. It now draws a 16px
+  grid behind the artboard - a 1px rule every 64px and a dot at every intersection - and
+  centres the design in the pane, so a fitted design shows the workspace around it instead
+  of running edge to edge. That centring is the change that makes the grid visible at all:
+  the ruler gutters were also what sized the artboard to the pane.
 - **The interaction layer** (alpha.13): a vendored Konva 10.7.0 (188 KB, one UMD
   script, no dependencies) draws nothing anybody sees - one invisible hit rect per
   laid-out box, nested exactly like the document, so the deepest node under the
@@ -94,7 +110,7 @@ the only painter, on screen and in the exported file.
 | session | a view receives no `sessionId` prop; it learns its session through its own `inject(sessionId)` face |
 | seats | one `tool.call.toolview` per tool name, plus the page-level renderer |
 | addresses | `dsh-resource://canvas/session/<session>/<id>`, `dsh-resource://canvas/library/<id>` |
-| skills | `canvas-design` and `social-banners`, registered at runtime **and** copied into `$DSH_HOME/skills` by both installers under a `.vncode-dsh-canvas` marker |
+| skills | four: `canvas-design` (the language and the craft), `social-banners` (per-destination delivery), `canvas-banner` (a banner built from nothing), `canvas-house-edit` (edit a house design, and the gate as the bar). Registered at runtime **and** copied into `$DSH_HOME/skills` by both installers under a `.vncode-dsh-canvas` marker |
 
 Routes are exact paths, `GET`/`HEAD`/`POST` only:
 

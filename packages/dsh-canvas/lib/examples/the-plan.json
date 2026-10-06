@@ -40,9 +40,9 @@
       },
       "scale": {
         "display": 60,
-        "title": 40,
+        "title": 44,
         "subtitle": 26,
-        "body": 22,
+        "body": 20,
         "caption": 15
       },
       "space": 8,
@@ -291,7 +291,7 @@
         "id": "step-4",
         "x": 946,
         "y": 348,
-        "w": 220,
+        "w": 192,
         "h": 120,
         "direction": "column",
         "children": [

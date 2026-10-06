@@ -39,7 +39,7 @@
         "mono": "system"
       },
       "scale": {
-        "display": 157,
+        "display": 137,
         "title": 39,
         "subtitle": 26,
         "body": 22,
@@ -71,7 +71,7 @@
         "id": "wordmark",
         "x": 64,
         "y": 208,
-        "w": 1152,
+        "w": "hug",
         "text": "Fieldnotes",
         "style": "display",
         "weight": 600,

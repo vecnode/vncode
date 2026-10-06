@@ -72,7 +72,7 @@
         "x": 64,
         "y": 152,
         "w": 552,
-        "text": "Ship a plugin in an afternoon.",
+        "text": "Ship a plugin today.",
         "style": "display",
         "weight": 700,
         "family": "mono",
@@ -86,7 +86,7 @@
         "x": 64,
         "y": 264,
         "w": 552,
-        "text": "One row, one bundle, no forks.",
+        "text": "One row, one bundle.",
         "style": "body",
         "family": "text",
         "color": "#7fb68c"
@@ -128,9 +128,9 @@
       {
         "kind": "frame",
         "id": "panel",
-        "x": 648,
+        "x": 616,
         "y": 144,
-        "w": 584,
+        "w": 440,
         "h": 352,
         "background": {
           "type": "solid",
@@ -176,7 +176,7 @@
             "kind": "text",
             "id": "line-2",
             "w": "fill",
-            "text": "installed canvas -> web profile",
+            "text": "installed -> web profile",
             "size": 15,
             "family": "mono",
             "color": "#7fb68c"
@@ -185,7 +185,7 @@
             "kind": "text",
             "id": "line-3",
             "w": "fill",
-            "text": "restart the harness to compose",
+            "text": "restart to compose",
             "size": 15,
             "family": "mono",
             "color": "#7fb68c"
@@ -194,7 +194,7 @@
             "kind": "text",
             "id": "line-4",
             "w": "fill",
-            "text": "canvas_new { preset: 'og' }",
+            "text": "canvas_new { preset }",
             "size": 15,
             "family": "mono",
             "color": "#c9ffd6"

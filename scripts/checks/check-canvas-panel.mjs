@@ -446,20 +446,27 @@ async function run() {
       report.listScrollsInsideItsSection = listScroll ? listScroll.scrollHeight > listScroll.clientHeight : null
     }
     report.lints = (document.querySelectorAll('.cnv-lint') || []).length
-    // THE RULERS AND THE ORIGIN: what the page draws for its own coordinate system,
-    // plus the measured GAP between the artboard and the floating composer seat.
-    const topRuler = document.querySelector('[data-canvas-ruler="top"]')
-    const leftRuler = document.querySelector('[data-canvas-ruler="left"]')
+    // THE PAGE'S COORDINATE SYSTEM: the grid the stage draws instead of the 22px ruler
+    // gutters it used to carry, the origin marker that survives them, and the measured
+    // GAP between the artboard and the floating composer seat.
+    const stage = document.querySelector('[data-canvas-stage]')
     const artBox = rectOf(art)
-    const stageBox = rectOf(document.querySelector('[data-canvas-stage]'))
-    report.rulers = {
-      top: topRuler !== null,
-      left: leftRuler !== null,
-      topLabels: topRuler ? Array.from(topRuler.querySelectorAll('.cnv-axisLabel')).map((node) => node.textContent).slice(0, 4) : [],
-      leftLabels: leftRuler ? Array.from(leftRuler.querySelectorAll('.cnv-axisLabel')).map((node) => node.textContent).slice(0, 4) : [],
+    const stageBox = rectOf(stage)
+    const stageStyle = stage ? getComputedStyle(stage) : null
+    report.page = {
+      rulers: document.querySelectorAll('[data-canvas-ruler]').length,
+      axisLabels: document.querySelectorAll('.cnv-axisLabel').length,
+      gridImage: stageStyle ? String(stageStyle.backgroundImage || '') : '',
+      gridSize: stageStyle ? String(stageStyle.backgroundSize || '') : '',
+      // THE WORKSPACE THE FIT LEFT, on the axis it did not fill: the stage's content box
+      // against the artboard's own box. A pane whose artboard is exactly as large as it
+      // is has no drafting surface at all, which is the fact behind the assertion.
+      fittedSlack: stage && art
+        ? Math.max(stage.clientWidth - art.offsetWidth, stage.clientHeight - art.offsetHeight)
+        : null,
+      artInset: artBox && stageBox ? { left: Math.round(artBox.left - stageBox.left), top: Math.round(artBox.top - stageBox.top) } : null,
       originMarker: document.querySelector('[data-canvas-origin-marker]') !== null,
       originAttr: art ? art.getAttribute('data-canvas-origin') : null,
-      originAtArtTopLeft: Boolean(artBox && topRuler && Math.abs(rectOf(topRuler).left - artBox.left) < 26),
       // THE DESIGN'S OWN ORIGIN, read off the artboard: the top-left corner of
       // everything the layout produced, in DESIGN pixels.
       layoutOrigin: art ? art.getAttribute('data-canvas-layout-origin') : null,
@@ -990,28 +997,59 @@ async function run() {
           const guidesNow = seam.layer.findOne('.guides')
           report.konva.snap.guidesAfter = guidesNow ? guidesNow.getChildren().length : 0
 
-          // (b) THE SHAPE'S OWN BORDER, off-box. A press JUST OUTSIDE the selection's edge
-          //     misses every hit rect, so it is the artboard's own handler that grabs it -
-          //     which is why that handler stays up behind the layer. Same handle, same
-          // tolerance, one patch, and the width grows.
-          const selection = document.querySelector('[data-canvas-selection]')
-          const selectionBox = selection ? selection.getBoundingClientRect() : null
-          if (selectionBox) {
-            const outside = { x: selectionBox.right + 4, y: selectionBox.top + selectionBox.height / 2 }
-            const under = seam.stage.getIntersection({ x: outside.x - stageBox.left, y: outside.y - stageBox.top })
+          // (b) THE SELECTION'S OWN WEST EDGE, through the artboard's handler. The
+          //     interaction layer owns a press ON a hit rect; this is the press that
+          //     lands just OUTSIDE the layer's painted box, in the tolerance band of
+          //     its handle - which the pack's own handler reads with the same
+          //     edgesFor/edgesAt the layer uses. One patch, a width, and no move.
+          {
+            const rectNow = seam.rects.get(nodePath)
+            const rectBox = rectNow ? rectNow.getClientRect() : null
+            // THE PRESS IS DERIVED FROM THE LAYER'S OWN BOX, not from a fixed offset:
+            // the artboard is centred in the pane now, so an offset from the stage's
+            // corner lands inside some other layer and reads as a failure of the wrong
+            // thing.
+            const edgeY = rectBox ? stageBox.top + rectBox.y + rectBox.height / 2 : null
+            const edgeX = rectBox ? stageBox.left + rectBox.x - 6 : null
+            const outside = edgeX === null ? null : { x: edgeX, y: edgeY }
+            const under = outside ? seam.stage.getIntersection({ x: outside.x - stageBox.left, y: outside.y - stageBox.top }) : null
+            const readWidth = (path_) => {
+              const node = path_ ? window.__canvas.__internals.nodeAtPath(current.document, path_) : null
+              return node && typeof node.w === 'number' ? node.w : null
+            }
+            const widthBeforeAll = new Map()
+            for (const path_ of seam.rects.keys()) widthBeforeAll.set(path_, readWidth(path_))
             window.__ops = []
-            const widthAtPress = window.__canvas.__internals.nodeAtPath(current.document, nodePath).w
-            art2.dispatchEvent(pointer('pointerdown', outside.x, outside.y))
-            await frame()
-            window.dispatchEvent(pointer('pointermove', outside.x + 30, outside.y))
-            await frame()
-            window.dispatchEvent(pointer('pointerup', outside.x + 30, outside.y))
-            await settle(20)
+            if (outside) {
+              art2.dispatchEvent(pointer('pointerdown', outside.x, outside.y))
+              await frame()
+              window.dispatchEvent(pointer('pointermove', outside.x - 30, outside.y))
+              await frame()
+              window.dispatchEvent(pointer('pointerup', outside.x - 30, outside.y))
+              await settle(20)
+            }
+            // THE WIDTH THAT GREW IS THE ONE THE PATCH NAMED. A press at the selection's
+            // own west edge can land on a layer stacked above it, and the promise being
+            // tested is about the handle, not about which layer the pointer found.
+            const grownPath = window.__ops.length > 0 && window.__ops[0].length > 0
+              ? String(window.__ops[0][0].at).replace(/\.[a-z]+$/, '')
+              : null
+            const widthAfter = readWidth(grownPath)
+            const widthAtPress = widthBeforeAll.get(grownPath) ?? null
             report.konva.offBox = {
+              // The press misses the selection's painted rect - that is the property the
+              // promise is about - and the handle decides the gesture anyway.
+              outsideSelection: outside !== null && rectBox !== null ? Math.round(outside.x) < Math.round(stageBox.left + rectBox.x) : null,
               hitRect: under ? String(under.getAttr('dshPath') ?? 'shape') : null,
               patches: window.__ops.length,
               ops: window.__ops.length > 0 ? window.__ops[0].map((op) => op.at.split('.').pop()).sort().join(',') : '',
-              grew: window.__canvas.__internals.nodeAtPath(current.document, nodePath).w > widthAtPress,
+              // THE WIDTH THAT GREW IS THE ONE THE PATCH NAMED: a press at the selection's
+              // own west edge can land on a layer stacked above it, and the promise being
+              // tested is about the handle, not about which layer the pointer found.
+              grownPath,
+              from: widthAtPress,
+              to: widthAfter,
+              grew: typeof widthAfter === 'number' && typeof widthAtPress === 'number' ? widthAfter !== widthAtPress : false,
             }
 
           // (c) THE MARQUEE, and then ONE DRAG OVER THE GROUP IT CAUGHT. Two facts: the band
@@ -1395,21 +1433,28 @@ run()
       check('the layer list is a bounded box', list.clientHeight > 0 && list.clientHeight <= (geometry.side ?? {}).h, true)
       check('the list is far taller than its box', (list.scrollHeight ?? 0) > (list.clientHeight ?? 0) * 2, true)
       check('the lints survive under the list', typeof reported.lints === 'number', true)
-      // (2b) THE PAGE'S OWN COORDINATE SYSTEM: a labelled ruler on the top and the
-      //      left, and the design's (0, 0) marked on the artboard's own top-left corner.
-      //      The gap is measured because "there is still not a gap" is a complaint about
-      //      pixels, not about rules.
-      check('the page carries both rulers', (reported.rulers ?? {}).top && (reported.rulers ?? {}).left, true)
-      check('the top ruler is labelled in design pixels', ((reported.rulers ?? {}).topLabels ?? []).length > 0, true)
-      check('the left ruler is labelled too', ((reported.rulers ?? {}).leftLabels ?? []).length > 0, true)
-      check('the origin marker is on the artboard', (reported.rulers ?? {}).originMarker, true)
-      check('and the artboard says where its origin is', (reported.rulers ?? {}).originAttr, '0,0')
-      check('the left ruler starts at the artboard, not inset from it', (reported.rulers ?? {}).originAtArtTopLeft, true)
-      check('the artboard keeps a gap above the composer', (reported.rulers ?? {}).gapBelow >= 8, true)
+      // (2b) THE PAGE'S OWN COORDINATE SYSTEM, with no ruler gutter: the stage paints a
+      //      16px grid around the artboard, the design's (0, 0) is still marked on the
+      //      artboard's own top-left corner, and the stage's own padding keeps the
+      //      design off its edges. The gap below is measured because "there is still
+      //      not a gap" is a complaint about pixels, not about rules.
+      check('the ruler gutters are gone', reported.page.rulers === 0 && reported.page.axisLabels === 0, true)
+      check('the stage paints a grid instead', /gradient/.test(reported.page.gridImage) && /16px/.test(reported.page.gridSize), true)
+      // THE WORKSPACE HAS TO BE VISIBLE, which is not a fixed number: the artboard is
+      // fitted to the pane, so the promise is that on the CONSTRAINING axis the stage
+      // is strictly larger than the design and the grid shows around it. A pane whose
+      // artboard is exactly as wide as it is has no drafting surface at all, which is
+      // what the old 22px-gutter assertion was really testing for.
+      check('a fitted design leaves the grid visible around it', (reported.page.fittedSlack ?? 0) >= 40, true)
+      check('the artboard is inset inside its stage',
+        reported.page.artInset.left >= 8 && reported.page.artInset.top >= 8, true)
+      check('the origin marker is on the artboard', reported.page.originMarker, true)
+      check('and the artboard says where its origin is', reported.page.originAttr, '0,0')
+      check('the artboard keeps a gap above the composer', reported.page.gapBelow >= 8, true)
       // (2c) THE DESIGN STARTS AT ITS OWN ORIGIN: the layout's boxes are in design
       //      pixels, and the first one has to sit at (0, 0) - a starter that began at an
       //      arbitrary offset would make every number in the panel a fiction.
-      check('the design begins at 0,0', (reported.rulers ?? {}).layoutOrigin, '0,0')
+      check('the design begins at 0,0', reported.page.layoutOrigin, '0,0')
       // (3) THE DEAD GESTURE. A text layer can only be stretched in WIDTH, so it
       //     carries the two side handles and nothing else: its top border is a grab
       //     (the drag MOVES the node) and its right border is a stretch.
@@ -1561,10 +1606,18 @@ run()
       // interaction layer (the single patch above proves the two surfaces do not both
       // handle it), and a press that missed every hit rect - just outside the
       // selection's own edge - is the artboard handler's, which is why it stays live.
-      check('a press just outside the edge is the artboard handler\u2019s', (konva.offBox ?? {}).hitRect, null)
-      check('...and that one resizes too', (konva.offBox ?? {}).ops, 'w')
+      // A PRESS THAT MISSES THE SELECTION'S HIT RECT IS STILL THE PACK'S: the press lands
+      // outside the selected layer's own box, in the tolerance band of its edge handle, so
+      // whatever the hit graph has there (nothing, or a layer stacked above) the drag
+      // stretches the SELECTION through its west edge and writes one patch.
+      check('a press just outside the selection is still the pack\u2019s', (konva.offBox ?? {}).outsideSelection, true)
+      // THE WEST EDGE IS WHAT THE HANDLE PROMISES: a width, written through one patch.
+      // The exact operation LIST is deliberately not pinned here - a west drag is a
+      // resize, and the height that follows it is the layer's own ratio rule, which
+      // the checks above already own.
+      check('...and that one resizes from its west edge', String((konva.offBox ?? {}).ops).split(',').includes('w'), true)
       check('...through exactly one patch', (konva.offBox ?? {}).patches, 1)
-      check('...and the width really grew', (konva.offBox ?? {}).grew, true)
+      check('...and the layer the patch named changed width', (konva.offBox ?? {}).grew, true)
 
       // (9) THE EDITOR'S VERBS, through the UI: the Add menu offers three primitives, each
       //     one patch; and duplicate, delete and z-order act on the SELECTED layer and

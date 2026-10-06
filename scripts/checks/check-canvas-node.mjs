@@ -644,7 +644,7 @@ check('every archetype validates, lays out and is lint-clean', archetypeProblems
 check('every archetype names a document preset', archetypesModule.ARCHETYPES.every((entry) => entry.presets.includes(entry.document.preset)), true)
 console.log('     ' + archetypeReport.join('\n     '))
 
-const skillFolders = ['canvas-design', 'social-banners']
+const skillFolders = ['canvas-design', 'social-banners', 'canvas-banner', 'canvas-house-edit']
 for (const folder of skillFolders) {
   const file = path.join(repo, 'packages/dsh-canvas/skills', folder, 'SKILL.md')
   const text = existsSync(file) ? readFileSync(file, 'utf8') : ''
@@ -665,13 +665,24 @@ for (const folder of skillFolders) {
   const all = folderText.join('\n')
   check('skill ' + folder + ' documents the preset table', all.includes('1280') && all.includes('1584'), true)
   check('skill ' + folder + ' names the report codes', all.includes('LOW_CONTRAST') || all.includes('SAFE_AREA'), true)
-  // The design skill teaches the whole loop; the delivery skill is about
-  // destinations, so it only has to name the export it tells the model to run.
-  check(
-    'skill ' + folder + ' names the tools it teaches',
-    folder === 'canvas-design' ? all.includes('canvas_patch') && all.includes('canvas_render') : all.includes('canvas_export'),
-    true,
-  )
+  // WHAT EACH SKILL HAS TO NAME, stated per skill rather than by role: a skill that
+  // cannot name the tool it tells the model to run, or the gate it tells the model to
+  // pass, is prose rather than an instruction. The delivery skill is about
+  // destinations, so it names the export; the design skills name the edit loop.
+  const REQUIRED = {
+    'canvas-design': ['canvas_patch', 'canvas_render'],
+    'social-banners': ['canvas_export'],
+    'canvas-banner': ['canvas_new', 'canvas_style', 'canvas_audit'],
+    'canvas-house-edit': ['canvas_patch', 'canvas_audit', 'canvas_render'],
+  }
+  const missing = (REQUIRED[folder] ?? []).filter((tool) => !all.includes(tool))
+  check('skill ' + folder + ' names the tools it teaches', missing.join(', '), '')
+  // THE HOUSE DESIGNS ARE THE THING TO EDIT, so the two new skills have to say so and
+  // point at the gallery the host actually serves - not at a list they remember.
+  if (folder === 'canvas-house-edit') {
+    check('the editing skill names the gate as the bar', all.includes('canvas_audit') && all.includes('TYPE_RATIO') && all.includes('FOCAL'), true)
+    check('the editing skill names the review protocol', all.includes('read_image') && all.includes('thumbnail'), true)
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -944,19 +955,41 @@ for (const pack of STYLE_LIST) {
 section('house gallery')
 {
   const examplesModule = await import(pathToFileURL(path.join(repo, 'packages/dsh-canvas/lib/examples/index.js')).href)
+  const gateModule = await import(pathToFileURL(path.join(repo, 'packages/dsh-canvas/lib/gate.js')).href)
   const generated = spawnSync(process.execPath, [path.join(repo, 'packages/dsh-canvas/vendor/examples.mjs'), '--check'], { encoding: 'utf8' })
   check('the gallery is what the table would generate', generated.status === 0 ? '' : ((generated.stdout ?? '') + (generated.stderr ?? '')).trim().slice(0, 240), '')
   check('the gallery carries twelve examples', examplesModule.EXAMPLE_LIST.length, 12)
   check('one example per style', new Set(examplesModule.EXAMPLE_LIST.map((entry) => entry.style)).size, 12)
+  // THE GATE REFERENCE THE MODEL READS IS GENERATED FROM THE GATE, so a check re-runs the
+  // generator: what the skill tells the model "perfect" means cannot drift from what
+  // canvas_audit actually enforces.
+  const gateDoc = spawnSync(process.execPath, [path.join(repo, 'packages/dsh-canvas/vendor/gate-doc.mjs'), '--check'], { encoding: 'utf8' })
+  check('the shipped gate reference matches the gate', gateDoc.status === 0 ? '' : ((gateDoc.stdout ?? '') + (gateDoc.stderr ?? '')).trim().slice(0, 240), '')
+  /** The assets an example's own images need, at the size a real workspace copy would be. */
+  const exampleAssets = (document) => {
+    const table = {}
+    const walk = (node) => {
+      if (node.kind === 'image' && typeof node.src === 'string') table[node.src] = { width: 1280, height: 800 }
+      for (const child of node.children ?? []) walk(child)
+    }
+    for (const layer of document.layers ?? []) walk(layer)
+    return table
+  }
   for (const example of examplesModule.EXAMPLE_LIST) {
     const verdict = engine.normalizeDocument(example.document, { presets: PRESETS, fonts: FONTS, styles: STYLE_TABLE })
     check('example ' + example.id + ' validates', verdict.problems.map((problem) => problem.code).join(','), '')
     if (!verdict.document) continue
-    const laid = engine.layout(verdict.document, { measure, assets: {}, fonts: FONTS })
-    const found = engine
-      .lintLayout(laid, verdict.document, PRESETS[example.preset], { assets: {} })
-      .filter((lint) => ['OFFGRID', 'SIBLING_EDGE', 'TEXT_ON_IMAGE', 'LOW_CONTRAST'].includes(lint.code))
-    check('example ' + example.id + ' is aligned and legible', found.map((lint) => lint.code + ' ' + lint.path).join(', '), '')
+    const assets = exampleAssets(verdict.document)
+    const laid = engine.layout(verdict.document, { measure, assets, fonts: FONTS })
+    // EVERY HOUSE DESIGN IS PERFECT, and this is the check that keeps it so: the gate is
+    // what the skill tells the model to pass and what canvas_audit reports, so a starter
+    // that quietly stops being perfect fails here rather than in a person's eye.
+    const audit = gateModule.auditDesign({ layoutResult: laid, document: verdict.document, preset: PRESETS[example.preset], problems: verdict.problems, assets })
+    check(
+      'example ' + example.id + ' passes the perfect gate',
+      audit.checks.filter((entry) => entry.state === 'fail').map((entry) => entry.id + ': ' + entry.detail).join(' | '),
+      '',
+    )
     check('example ' + example.id + ' says when to reach for it', typeof example.intent === 'string' && example.intent.length >= 20, true)
     check('example ' + example.id + ' carries the copy to write', Boolean(example.copy && example.copy.headline), true)
   }
@@ -1024,9 +1057,13 @@ function makeCtx() {
 }
 const { ctx, registered } = makeCtx()
 hostModule.apply(ctx)
-check('nine tools registered', registered.tools.length, hostModule.TOOL_NAMES.length)
-check('nine tool names match', registered.tools.map((tool) => tool.name).sort().join(','), hostModule.TOOL_NAMES.slice().sort().join(','))
-check('both skills registered', registered.skills.length, 2)
+check('every tool registered', registered.tools.length, hostModule.TOOL_NAMES.length)
+check('the tool names match', registered.tools.map((tool) => tool.name).sort().join(','), hostModule.TOOL_NAMES.slice().sort().join(','))
+// FOUR SKILLS, one per way a design goes wrong: the language, the destinations, the
+// banner built from nothing, and the house design that has to be EDITED rather than
+// rewritten. The count is asserted rather than derived, because a skill is registered
+// from a file and a missing file would otherwise just be a shorter list.
+check('four skills registered', registered.skills.map((skill) => skill.name).sort().join(','), 'canvas-banner,canvas-design,canvas-house-edit,social-banners')
 check('the view routes plus every font file registered', registered.routes.length > 8, true)
 check('the engine route is registered', registered.routes.some((route) => route.path === '/api/dsh-canvas/vendor/engine.js'), true)
 check('one route per font file', registered.routes.filter((route) => route.path.includes('/vendor/fonts/')).length, 5)

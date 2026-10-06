@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     /** The version marker shown in the toolbar, so a fresh bundle is easy to spot. */
-    const PLUGIN_VERSION = '0.1.0-alpha.14'
+    const PLUGIN_VERSION = '0.1.0-alpha.15'
     /** The conversation view this package adds to the chat panel's ring. */
     const VIEW_ID = 'canvas'
     /** Keep in sync with lib/index.js. */
@@ -71,7 +71,7 @@ window.__ModuleLoader__.load({
      */
     const KONVA_PAINT_ROUTE = API_ROOT + '/vendor/konva-paint.js'
     /** The tool names whose conversation cards this package draws. */
-    const TOOL_NAMES = ['canvas_new', 'canvas_write', 'canvas_patch', 'canvas_read', 'canvas_style', 'canvas_set', 'canvas_publish', 'canvas_delete', 'canvas_render', 'canvas_export', 'canvas_assets']
+    const TOOL_NAMES = ['canvas_new', 'canvas_write', 'canvas_patch', 'canvas_read', 'canvas_style', 'canvas_set', 'canvas_publish', 'canvas_delete', 'canvas_render', 'canvas_export', 'canvas_assets', 'canvas_audit']
     /** The zoom ladder. `fit` is resolved from the stage size at paint time. */
     const ZOOM_STEPS = ['fit', 0.25, 0.5, 1, 2]
     /** The feed-size factor a report carries, so the model can judge a phone feed. */
@@ -166,33 +166,34 @@ window.__ModuleLoader__.load({
 .cnv-danger{color:var(--dsw-alias-state-error-primary)}
 .cnv-row[data-armed=true]{border-color:var(--dsw-alias-state-error-primary)}
 .cnv-rowMeta{font-size:10.5px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cnv-stage{flex:1;min-width:0;min-height:0;overflow:auto;position:relative;background:repeating-conic-gradient(from 0deg,var(--dsw-alias-bg-layer-1) 0% 25%,transparent 0% 50%) 0 0/16px 16px}
+.cnv-stage{flex:1;min-width:0;min-height:0;overflow:auto;position:relative;background-color:#0b0e14}
+/* THE DRAFTING GRID behind the artboard, as a 16px GRID rather than a checkerboard:
+   a checker reads as "this square is a swatch", while faint rules are the surface a
+   page is placed on and they give the eye a scale to judge the artboard against -
+   which is the whole point of a workspace behind a page. The two gradients are the
+   1px rules (every 64px) and the third is a dot at every 16px intersection. The rule
+   colour is a LITERAL, not a theme token: a workspace is furniture rather than
+   content, it must read the same in a light and a dark profile, and a color-mix of a
+   variable a host does not define resolves to transparent - which is a grid that
+   silently does not draw. It is anchored on the attribute rather than the class
+   because the stage element the layout mounts carries the attribute. */
+[data-canvas-stage]{background-image:linear-gradient(to right,rgba(148,163,184,.13) 1px,transparent 1px),linear-gradient(to bottom,rgba(148,163,184,.13) 1px,transparent 1px),radial-gradient(circle at 1px 1px,rgba(148,163,184,.26) 1px,transparent 1.4px);background-size:64px 64px,64px 64px,16px 16px}
 .cnv-stage[data-panning=true]{cursor:grabbing}
-/* THE PAGE: a 22px RULER gutter on the top and the left, the artboard in the corner
-   they meet at. The gutter is a grid track rather than padding so the rig is one box
-   the stage can centre and scroll - and because the gutter is the ONLY horizontal
-   inset on the left, design x=0 lands on the artboard's own left edge, which is what
-   makes the origin marker the origin. */
-/* THE BOTTOM INSET IS THE CLEARANCE PLUS A GAP. The clearance is measured TO the
+/* THE PAGE: the artboard, centred in the stage, with no gutter furniture around it.
+   ONE COLUMN AND ONE ROW OF 1fr ARE THE PANE'S OWN CONTENT BOX, never the artboard's -
+   which is the point, because a container that sizes itself to the design cannot show
+   any workspace around it. The rig is centred in those tracks.
+   THE BOTTOM INSET IS THE CLEARANCE PLUS A GAP. The clearance is measured TO the
    composer's top edge, so reserving exactly it leaves the artboard touching the input
-   box - which is what "glued together" means. The page adds its own 10px on top, and
-   the same 10px inset on the other three sides keeps the ruler gutters off the frame. */
-.cnv-pad{min-width:100%;min-height:100%;display:grid;grid-template-columns:22px 1fr;grid-template-rows:22px 1fr;align-items:stretch;justify-items:stretch;gap:0;padding:10px 10px calc(var(--cnv-composer-clearance,168px) + 10px) 10px}
-.cnv-rig{grid-column:2;grid-row:2;position:relative;justify-self:center;align-self:center}
+   box - which is what "glued together" means; the same 10px on the other three sides
+   keeps the design off the stage's edges.
+   THE GRID IS A LITERAL COLOUR, not a theme token: a workspace is furniture rather
+   than content, it must read the same in a light and a dark profile, and a color-mix
+   of a variable a host does not define resolves to transparent - which is a grid that
+   silently does not draw. */
+.cnv-pad{min-width:100%;min-height:100%;box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);align-items:center;justify-items:center;gap:0;padding:10px 10px calc(var(--cnv-composer-clearance,168px) + 10px) 10px}
+.cnv-rig{grid-column:1;grid-row:1;position:relative;justify-self:center;align-self:center}
 .cnv-padEmpty{grid-column:1/-1;grid-row:1/-1;display:flex;align-items:center;justify-content:center}
-/* THE RULERS. They live in the stage, not the rig, so they stay on screen while a
-   zoomed design is panned - and they are LABELLED in DESIGN pixels, which is the one
-   coordinate system the document and the transform controls both speak. */
-.cnv-axis{position:absolute;background:var(--dsw-alias-bg-layer-1);z-index:3;pointer-events:auto}
-.cnv-axisTop{top:0;height:22px;border-bottom:.5px solid var(--dsw-alias-border-l3)}
-.cnv-axisLeft{left:0;width:22px;border-right:.5px solid var(--dsw-alias-border-l3)}
-.cnv-axisTick{position:absolute;background:var(--dsw-alias-border-l3);pointer-events:none}
-.cnv-axisTop .cnv-axisTick{bottom:0;width:1px;height:6px}
-.cnv-axisLeft .cnv-axisTick{right:0;height:1px;width:6px}
-.cnv-axisLabel{position:absolute;font:9px/1 var(--ds-font-family-code,monospace);color:var(--dsw-alias-label-tertiary);pointer-events:none;white-space:nowrap}
-.cnv-axisTop .cnv-axisLabel{top:3px;transform:translateX(-50%)}
-.cnv-axisLeft .cnv-axisLabel{left:3px;transform:translateY(-50%)}
-.cnv-axisCorner{position:absolute;left:0;top:0;width:22px;height:22px;background:var(--dsw-alias-bg-layer-1);border-right:.5px solid var(--dsw-alias-border-l3);border-bottom:.5px solid var(--dsw-alias-border-l3);z-index:4}
 .cnv-art{position:relative;box-shadow:0 18px 44px rgba(0,0,0,.28);border-radius:2px;overflow:hidden;cursor:grab;touch-action:none}
 .cnv-art canvas{display:block;width:100%;height:100%}
 .cnv-art[data-dragging=move]{cursor:grabbing}
@@ -1384,6 +1385,8 @@ window.__ModuleLoader__.load({
       const rigRef = useRef(null)
       /** True from pointer down to pointer up: a hover must not repaint the cursor mid-drag. */
       const draggingRef = useRef(false)
+      /** How much workspace a "fit" zoom leaves around the design, in screen pixels. */
+      const FIT_RESERVE = 72
 
       // A "fit" zoom is measured from the stage, and re-measured when it resizes.
       useEffect(() => {
@@ -1391,8 +1394,11 @@ window.__ModuleLoader__.load({
         const element = wrapRef.current
         if (!element) return undefined
         const measure = () => {
-          const box = element.getBoundingClientRect()
-          const scale = Math.min((box.width - 56) / document_.canvas.width, (box.height - 56) / document_.canvas.height, 1)
+          // THE CONTENT BOX, and a reserve IN SCREEN PIXELS: the bounding rect would
+          // include the padding and the composer clearance, and the reserve is the
+          // drafting surface that must stay visible, so it must not shrink when the
+          // design is a 3508px poster.
+          const scale = Math.min((element.clientWidth - FIT_RESERVE) / document_.canvas.width, (element.clientHeight - FIT_RESERVE) / document_.canvas.height, 1)
           setFit(scale > 0.05 ? scale : 0.05)
         }
         measure()
@@ -1631,34 +1637,12 @@ window.__ModuleLoader__.load({
         if (chosen) onEditText(chosen.path)
       }
 
-      // THE RULERS READ THE PAGE'S OWN GEOMETRY, measured from the stage: where the
-      // artboard's top-left corner sits in the scroller (which is the design's origin)
-      // and how many screen pixels one design pixel takes. Both change with the zoom
-      // and with panning, so they are re-measured when either does.
-      const [rigBox, setRigBox] = useState({ originX: 0, originY: 0, length: 0, breadth: 0 })
-      useEffect(() => {
-        const stage = wrapRef.current
-        const rig = rigRef.current
-        if (!stage || !rig) return undefined
-        const measure = () => {
-          const stageBox = stage.getBoundingClientRect()
-          const artBox = rig.getBoundingClientRect()
-          setRigBox({
-            originX: artBox.left - stageBox.left + stage.scrollLeft,
-            originY: artBox.top - stageBox.top + stage.scrollTop,
-            length: stage.scrollWidth,
-            breadth: stage.scrollHeight,
-          })
-        }
-        measure()
-        stage.addEventListener('scroll', measure, { passive: true })
-        const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null
-        if (observer) observer.observe(stage)
-        return () => {
-          stage.removeEventListener('scroll', measure)
-          if (observer) observer.disconnect()
-        }
-      }, [scale, preparedVersion, zoom, document_.canvas.width, document_.canvas.height])
+      // WHAT REPLACED THE RULERS. The stage used to carry a 22px ruler gutter on the
+      // top and the left, which cost the artboard 44px of every pane at every zoom for
+      // numbers a person reads off the transform controls instead. The page now draws a
+      // 16px grid (the stage's own background), and the design's own origin is still
+      // reported on the artboard - the origin attribute plus the marker at its top-left
+      // corner - so "where is x=0" is answered without a gutter.
 
       // THE DESIGN'S OWN ORIGIN, reported on the artboard for the same reason the
       // version marker is: it is a fact about the layout that a person (or a check)
@@ -1680,9 +1664,6 @@ window.__ModuleLoader__.load({
       return h(
         'div',
         { className: 'cnv-pad', ref: wrapRef, 'data-canvas-stage': 'true' },
-        h(Ruler, { axis: 'top', origin: rigBox.originX, scale, length: rigBox.length, thickness: 22 }),
-        h(Ruler, { axis: 'left', origin: rigBox.originY, scale, length: rigBox.breadth, thickness: 22 }),
-        h('div', { className: 'cnv-axisCorner', 'data-canvas-ruler-corner': 'true' }),
         h(
           'div',
           { className: 'cnv-rig', ref: rigRef, 'data-canvas-rig': 'true' },
@@ -1806,52 +1787,6 @@ window.__ModuleLoader__.load({
       const layers = document_ && Array.isArray(document_.layers) ? document_.layers : []
       for (let index = 0; index < layers.length; index += 1) walk(layers[index], 'layers.' + index, 0)
       return rows
-    }
-
-    /**
-     * A RULER along one edge of the stage, LABELLED IN DESIGN PIXELS.
-     *
-     * The tick spacing is chosen so labels never collide (the same choice the audio
-     * surface's time ruler makes), and every number is a position in the DESIGN's own
-     * coordinate system - so the `x` a transform control shows is the same number the
-     * ruler shows, and a design's (0, 0) is the artboard's top-left corner. The ruler
-     * lives in the STAGE rather than on the artboard, so panning a zoomed design
-     * scrolls the numbers past a fixed gutter instead of carrying them away.
-     */
-    function Ruler({ axis, origin, scale, length, thickness }) {
-      const step = [10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000].find((candidate) => candidate * Math.abs(scale) >= 64) ?? 10000
-      const ticks = []
-      const first = Math.ceil((-origin / scale) / step) * step
-      const count = Math.floor((length - origin) / scale / step) + 1
-      for (let index = 0; index < Math.max(0, count); index += 1) {
-        const value = first + index * step
-        const at = origin + value * scale
-        if (at < thickness || at > length) continue
-        ticks.push({ value, at })
-      }
-      const horizontal = axis === 'top'
-      return h(
-        axis === 'top' ? 'div' : 'div',
-        {
-          className: 'cnv-axis ' + (horizontal ? 'cnv-axisTop' : 'cnv-axisLeft'),
-          'data-canvas-ruler': axis,
-          style: horizontal ? { left: thickness, right: 0 } : { top: thickness, bottom: 0 },
-        },
-        ticks.map((tick) =>
-          h('span', {
-            key: 'tick-' + tick.value,
-            className: 'cnv-axisTick',
-            style: horizontal ? { left: Math.round(tick.at - thickness) + 'px' } : { top: Math.round(tick.at - thickness) + 'px' },
-          }),
-        ),
-        ticks.map((tick) =>
-          h('span', {
-            key: 'label-' + tick.value,
-            className: 'cnv-axisLabel',
-            style: horizontal ? { left: Math.round(tick.at - thickness) + 'px' } : { top: Math.round(tick.at - thickness) + 'px' },
-          }, String(tick.value)),
-        ),
-      )
     }
 
     /**
@@ -4335,6 +4270,7 @@ window.__ModuleLoader__.load({
       if (toolName === 'canvas_render') return 'Rendering in the browser…'
       if (toolName === 'canvas_export') return 'Writing the file…'
       if (toolName === 'canvas_new') return 'Starting a design' + (args && args.preset ? ' for ' + args.preset : '') + '…'
+      if (toolName === 'canvas_audit') return 'Scoring the design against the gate…'
       return 'Working on the design…'
     }
 
