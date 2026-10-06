@@ -903,7 +903,11 @@ export function buildTools(row, ctx) {
             properties: {
               op: { type: 'string', enum: ['set', 'remove', 'insert'] },
               at: { type: 'string' },
-              value: { type: ['object', 'array', 'string', 'number', 'boolean', 'null'] },
+              // Any lossless JSON value. The harness's enforced schema subset has
+              // no type arrays, and its unconstrained-JSON form is the
+              // annotation-only schema - which is what `value` has always meant
+              // to the patcher (`set` a scalar, an object or a whole subtree).
+              value: {},
             },
             required: ['op', 'at'],
           },

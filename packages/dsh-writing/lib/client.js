@@ -53,7 +53,7 @@ window.__ModuleLoader__.load({
     const { useCallback, useEffect, useMemo, useRef, useState } = React
 
     /** The version marker shown in the status bar, so a fresh bundle is easy to spot. */
-    const PLUGIN_VERSION = '0.1.0-alpha.6'
+    const PLUGIN_VERSION = '0.1.0-alpha.7'
     /** The conversation view this package adds to the chat panel's ring. */
     const VIEW_ID = 'writing'
     /** Base URL of this plugin's own authenticated routes. */

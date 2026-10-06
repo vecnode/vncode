@@ -1,6 +1,6 @@
 {
   "name": "dsh-canvas",
-  "version": "0.1.0-alpha.13",
+  "version": "0.1.0-alpha.14",
   "description": "Canvas: a design page the agent drives - eleven `canvas_*` tools over a small JSON design language validated on the host and painted by the browser, exported at preset sizes, with a style library, presets, archetypes and an asset store.",
   "type": "module",
   "main": "lib/index.js",

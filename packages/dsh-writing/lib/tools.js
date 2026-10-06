@@ -148,7 +148,10 @@ export function buildTools(deps) {
                   kind: { type: 'string' },
                   words: { type: 'integer' },
                   revision: { type: 'integer' },
-                  origin: { type: ['string', 'null'] },
+                  // `origin` is a path or null, and the harness's enforced JSON
+                  // Schema subset has no type arrays (`tools.register` refuses
+                  // them by name), so a nullable scalar is spelled as `oneOf`.
+                  origin: { oneOf: [{ type: 'string' }, { type: 'null' }] },
                 },
               },
             },
