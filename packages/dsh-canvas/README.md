@@ -88,6 +88,11 @@ page answering within 20 s says so.
 - **Advisory lints**, each with a fix: `SAFE_AREA`, `MARGIN`, `LOW_CONTRAST`, `TYPE_TOO_SMALL`,
   `TEXT_TRUNCATED`, `TEXT_OVERFLOW`, `TEXT_UNWRAPPED`, `MANY_SIZES`, `MANY_FAMILIES`, `NO_TEXT`,
   `MISSING_ASSET`, `IMAGE_UNMEASURED`, `SVG_FRAGMENT_UNPAINTED`.
+- **Save** on the bar does both halves of what one button is for: it **confirms** the
+  design against the host and reports the revision it is on, then **writes it out** - a
+  PNG at the design's own pixels, on this machine's Desktop, through the same export
+  route the menu's PNG row uses, so the two can never hand back different files. The
+  design is still persisted by the host on every edit: Save invents no second writer.
 - **Exports**: PNG/JPG/SVG at 1x or 2x, to the Desktop (default) or the
   conversation folder, create-exclusive (`-2`, `-3`, ...); the preset decides the
   format and the ceiling, and one over the ceiling still writes and says so.

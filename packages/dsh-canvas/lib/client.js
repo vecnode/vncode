@@ -106,6 +106,16 @@ window.__ModuleLoader__.load({
 .cnv-menu>summary{list-style:none;cursor:pointer;user-select:none;white-space:nowrap}
 .cnv-menu>summary::-webkit-details-marker{display:none}
 .cnv-menu[open]>summary{background:var(--dsw-alias-interactive-bg-active)}
+/* THE BAR RELEASES ITS CLIP WHILE A MENU IS OPEN, and this rule is the whole fix for
+   "the export dropdown stays behind the panels". The bar is overflow:hidden so that a
+   narrow pane cannot spill its chips over the columns beside it - but a panel is a
+   DESCENDANT of the bar and hangs 6px below a 38px one, so that clip took the entire
+   dropdown out of the picture. A Z-INDEX CANNOT ESCAPE A CLIP: the panel already ranked
+   1000 and was still not painted, which is why raising that number did not fix it the
+   first time. Released only while a menu is open, so the bar clips exactly as before the
+   rest of the time. Measured by check-canvas-panel.mjs, which hit-tests the panel's own
+   corners rather than reading its z-index. */
+.cnv-bar:has(.cnv-menu[open]){overflow:visible}
 /* The panel has to clear every column of the app's own furniture - the composer seat
    is 7 (9 with a menu open), the frame's overlay layer 20, the sidebar's fixed
    controls 30 - because the canvas view is a box INSIDE that layout. 1000 is the
@@ -3331,11 +3341,45 @@ window.__ModuleLoader__.load({
       )
 
       /**
-       * SAVE: the design is already persisted by the host on every edit, so what this
-       * does is CONFIRM it - it re-reads the state and reports the revision the host
-       * holds, which is the one fact a person wants before they close the tab. It
-       * deliberately does not invent a second persistence path: two writers for one
-       * document is how a document forks.
+       * One export, written by the host, answering the path it wrote. BOTH the export
+       * menu and the bar's Save go through this: two implementations of "give me the
+       * picture" is how the file a person gets from Save and the file they get from the
+       * menu drift apart, and the rasterization is the part that would drift.
+       */
+      const writeExport = useCallback(
+        async (format, scale, target) => {
+          const prepared = await prepareRender(engine, selected.document, preset, sessionId, (state && state.fonts) || {})
+          let payload = { session: sessionId, id: selected.id, scope: selected.scope, revision: selected.revision, purpose: 'export', format, scale, target, name: selected.id }
+          if (format === 'svg') {
+            payload = { ...payload, ok: true, svg: await svgPayload(engine, prepared, selected.document, (state && state.fonts) || {}, sessionId) }
+          } else {
+            const canvas = await rasterize(engine, prepared, scale === 2 ? 2 : 1)
+            // A DESIGN WITH NO CANVAS IS NOT AN EXPORT: 0x0 pixels encodes to no bytes at
+            // all, and a file of nothing on the Desktop reported as "Wrote ..." is worse
+            // than a refusal. Every stored design carries a canvas, so this is the broken
+            // document saying so.
+            if (!canvas || !canvas.width || !canvas.height) throw new Error('this design has no canvas to export')
+            const mime = format === 'jpg' ? 'image/jpeg' : 'image/png'
+            const blob = await canvasBlob(canvas, mime, format === 'jpg' ? 0.92 : undefined)
+            payload = { ...payload, ok: true, png: await blobToBase64(blob), width: canvas.width, height: canvas.height }
+          }
+          const answer = await api(REPORT_ROUTE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
+          return answer && answer.path ? answer.path : 'the file'
+        },
+        [engine, selected, sessionId, preset, state],
+      )
+
+      /**
+       * SAVE: the design is already persisted by the host on every edit, so this CONFIRMS
+       * it - it re-reads the state and reports the revision the host holds - and then it
+       * HANDS BACK THE PICTURE: one PNG at the design's own pixels, written to this
+       * machine's Desktop. Both halves belong to one button, because the revision is the
+       * fact a person wants before they close the tab and the PNG is the thing they came
+       * for. It still invents no second persistence path - two writers for one document
+       * is how a document forks - and the file comes from the SAME export route the
+       * menu's own PNG row uses, so Save cannot produce a file the menu would not. A
+       * write that fails is reported rather than hidden: the note carries both facts,
+       * and the note starts with "Saved" either way, because the revision WAS confirmed.
        */
       const saveDesign = useCallback(async () => {
         if (!selected || !sessionId) return
@@ -3346,18 +3390,31 @@ window.__ModuleLoader__.load({
           applyState(storeFor(sessionId), payload)
           const designs = Array.isArray(payload && payload.designs) ? payload.designs : []
           const saved = designs.find((entry) => entry.id === selected.id) ?? null
-          setNote({
-            kind: 'info',
-            text: saved
-              ? 'Saved: ' + saved.id + ' is on the host at revision ' + saved.revision + (saved.title ? ' (' + saved.title + ')' : '') + '.'
-              : selected.id + ' is no longer in this conversation.',
-          })
+          if (!saved) {
+            setNote({ kind: 'info', text: selected.id + ' is no longer in this conversation.' })
+            return
+          }
+          const confirmed = 'Saved: ' + saved.id + ' is on the host at revision ' + saved.revision + (saved.title ? ' (' + saved.title + ')' : '') + '.'
+          let written = null
+          let failure = null
+          if (engine) {
+            try {
+              written = await writeExport('png', 1, 'desktop')
+            } catch (err) {
+              failure = err && err.message ? err.message : 'the PNG could not be written'
+            }
+          }
+          setNote(
+            failure
+              ? { kind: 'error', text: confirmed + ' The PNG did not reach the Desktop: ' + failure }
+              : { kind: 'info', text: written ? confirmed + ' PNG on the Desktop: ' + written : confirmed },
+          )
         } catch (err) {
           setNote({ kind: 'error', text: err && err.message ? err.message : 'the design could not be confirmed' })
         } finally {
           setBusy(false)
         }
-      }, [selected, sessionId])
+      }, [selected, sessionId, engine, writeExport])
 
       /** Start a new design from a preset + archetype. */
       const createDesign = useCallback(
@@ -3398,18 +3455,8 @@ window.__ModuleLoader__.load({
           setExporting(label ?? format)
           setNote(null)
           try {
-            const prepared = await prepareRender(engine, selected.document, preset, sessionId, (state && state.fonts) || {})
-            let payload = { session: sessionId, id: selected.id, scope: selected.scope, revision: selected.revision, purpose: 'export', format, scale, target, name: selected.id }
-            if (format === 'svg') {
-              payload = { ...payload, ok: true, svg: await svgPayload(engine, prepared, selected.document, (state && state.fonts) || {}, sessionId) }
-            } else {
-              const canvas = await rasterize(engine, prepared, scale === 2 ? 2 : 1)
-              const mime = format === 'jpg' ? 'image/jpeg' : 'image/png'
-              const blob = await canvasBlob(canvas, mime, format === 'jpg' ? 0.92 : undefined)
-              payload = { ...payload, ok: true, png: await blobToBase64(blob), width: canvas.width, height: canvas.height }
-            }
-            const answer = await api(REPORT_ROUTE, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })
-            setNote({ kind: 'info', text: 'Wrote ' + (answer && answer.path ? answer.path : 'the file') })
+            const written = await writeExport(format, scale, target)
+            setNote({ kind: 'info', text: 'Wrote ' + written })
             // The menu closes on a WRITE, not on the gesture that started it: a failed
             // export leaves it open, on the row the person is about to press again.
             const menu = exportMenuRef.current
@@ -3422,7 +3469,7 @@ window.__ModuleLoader__.load({
             setExporting('')
           }
         },
-        [engine, selected, sessionId, preset, state],
+        [engine, selected, sessionId, writeExport],
       )
 
       const onLints = useCallback((value) => setLints(value), [])
@@ -3660,7 +3707,7 @@ window.__ModuleLoader__.load({
         // tab, and a fact only the HOST can answer. So it re-reads the design rather
         // than pretending to write one: no optimistically-saved document can disagree
         // with the file.
-        h(Btn, { onClick: saveDesign, disabled: busy || !selected, title: 'Confirm this revision is saved on the host' }, 'Save'),
+        h(Btn, { onClick: saveDesign, disabled: busy || !selected, title: 'Confirm the host revision and write a PNG to the Desktop' }, 'Save'),
         h(Btn, { onClick: () => refresh(sessionId, { force: true }) }, 'Reload'),
       )
 

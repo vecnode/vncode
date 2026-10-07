@@ -694,6 +694,29 @@ async function run() {
       const panel = exportControl.querySelector('.cnv-menuPanel')
       report.menuLayer = panel ? getComputedStyle(panel).zIndex : null
       report.menuAboveFurniture = panel ? Number(getComputedStyle(panel).zIndex) > 30 : false
+      // A RANK IS NOT A PICTURE, and this is the measurement that was missing. The panel
+      // is a DESCENDANT of the bar, so an ancestor with overflow:hidden clips it away
+      // however high it ranks - and the bar sets exactly that: the panel drops 6px below
+      // a 38px bar, so the whole dropdown was clipped out of the picture while a z-index
+      // assertion sat here passing. Hit-testing is the authority: a clipped box is not
+      // hit, and a box something has been painted over answers with that something.
+      if (panel) {
+        const bar = document.querySelector('[data-canvas-bar]')
+        const box = rectOf(panel)
+        const probe = (y) => {
+          const hit = document.elementFromPoint(Math.round(box.left + box.width / 2), Math.round(y))
+          return { hit: hit ? String(hit.className || hit.tagName).split(' ')[0] : null, mine: hit ? panel.contains(hit) || hit === panel : false }
+        }
+        report.menuPaint = {
+          barOverflow: getComputedStyle(bar).overflow,
+          barBottom: Math.round(rectOf(bar).bottom),
+          top: Math.round(box.top),
+          bottom: Math.round(box.bottom),
+          head: probe(box.top + 6),
+          middle: probe(box.top + box.height / 2),
+          foot: probe(box.bottom - 6),
+        }
+      }
       report.exportItems = Array.from(exportControl.querySelectorAll('[data-canvas-export-item]')).map((node) => node.getAttribute('data-canvas-export-item')).join(',')
       // The rows carry the DESTINATION too, which is the axis the old four buttons
       // spelled out in their labels.
@@ -706,7 +729,9 @@ async function run() {
         for (let attempt = 0; attempt < 200 && window.__exports.length === 0; attempt += 1) await frame()
         await settle(6)
         report.exportDone = {
-          requests: window.__exports,
+          // A COPY, not the live array: Save exports too, and a reference here would
+          // make the menu's own count grow behind its back later in the run.
+          requests: window.__exports.slice(),
           menuClosed: exportControl.open === false,
         }
       }
@@ -773,17 +798,22 @@ async function run() {
       const emptyY = rectOf(art).bottom - 6
       await drag(emptyX, emptyY, emptyX + 3, emptyY)
       report.deselected = document.querySelector('[data-canvas-selection]') === null
-      // (g) SAVE is on the bar and reports what the HOST holds.
+      // (g) SAVE is on the bar, reports what the HOST holds, AND hands back the picture.
+      const exportsBeforeSave = window.__exports.length
       const saveButton = Array.from(document.querySelectorAll('[data-canvas-bar] button')).find((node) => node.textContent === 'Save')
       report.saveButton = Boolean(saveButton)
       if (saveButton) {
         saveButton.click()
         for (let attempt = 0; attempt < 120; attempt += 1) {
           const note = document.querySelector('.cnv-note')
-          if (note && note.textContent.indexOf('Saved') === 0) break
+          const settled = note && note.textContent.indexOf('Saved') === 0 && window.__exports.length > exportsBeforeSave
+          if (settled) break
           await frame()
         }
         report.saveNote = (document.querySelector('.cnv-note') || {}).textContent || ''
+        // COUNTED AS A REQUEST, not as the note: the note is prose and this is the file.
+        // One Save, one export, at the design's own pixels, to the Desktop.
+        report.saveExports = window.__exports.slice(exportsBeforeSave)
       }
 
     // (h) THE VENDORED INTERACTION LAYER, in its OWN mount.
@@ -1281,16 +1311,22 @@ run()
       document: verdict.document,
       verification: null,
     }
-    // A SECOND, tiny design so the rail has a real list: it proves the delete removes
-    // ONE row and leaves the tab standing, which a one-row rail cannot.
+    // A SECOND design so the rail has a real list: it proves the delete removes ONE row
+    // and leaves the tab standing, which a one-row rail cannot. It is a BLANK canvas of
+    // the same preset - normalized, exactly as every stored design is - and both halves
+    // of that matter: a fixture carrying the archetype's RAW document has no canvas at
+    // all (Save exports the SELECTED design and would write 0x0 pixels), while one
+    // carrying a full archetype is covered edge to edge, so the click-on-empty-canvas
+    // step next door would land on a layer instead of on nothing.
+    const spareVerdict = canvasEngine.normalizeDocument({ preset: presetId, layers: [] }, { presets: PRESETS, fonts })
     const spare = {
       id: 'panel-spare',
       title: 'Panel spare',
       preset: presetId,
       revision: 1,
       scope: 'conversation',
-      warnings: 0,
-      document: JSON.parse(JSON.stringify(archetype.document)),
+      warnings: spareVerdict.problems.length,
+      document: spareVerdict.document ?? { preset: presetId, layers: [] },
       verification: null,
     }
     const state = { designs: [design, spare], presets: PRESETS, fonts, styles: styleGallery(), examples: exampleGallery(), archetypes: ARCHETYPES.map((entry) => ({ id: entry.id, title: entry.title, presets: entry.presets, description: entry.description })), engineRoute: '/api/dsh-canvas/vendor/engine.js', version: clientVersion }
@@ -1523,6 +1559,15 @@ run()
       check('a click on empty canvas de-selects', reported.deselected, true)
       check('the bar carries a Save button', reported.saveButton, true)
       check('Save reports the host revision', String(reported.saveNote ?? '').indexOf('is on the host at revision') > 0, true)
+      // SAVE HANDS BACK THE PICTURE TOO: one PNG at the design's own pixels, to the
+      // Desktop, through the same export route the menu's own PNG row uses.
+      const saved = (reported.saveExports ?? [])[0] ?? {}
+      check('Save writes the design out as well', (reported.saveExports ?? []).length, 1)
+      check('...as a PNG', saved.format, 'png')
+      check('...at the design\u2019s own pixels', saved.scale, 1)
+      check('...to the Desktop', saved.target, 'desktop')
+      check('...from a real rasterization', saved.png === true && saved.pngBytes > 2000, true)
+      check('...and says where the file landed', String(reported.saveNote ?? '').indexOf('PNG on the Desktop: ') > 0, true)
       // (7) THE EXPORT MENU in the top bar: one control for format x destination.
       check('the bar carries one export control', reported.exportControl, true)
       check('it names the action while closed', reported.exportSummary, 'Export \u25be')
@@ -1530,6 +1575,10 @@ run()
       check('the bar keeps one row', (reported.bar ?? {}).lines, 1)
       check('the control opens', reported.exportOpen, true)
       check('an open menu clears the app furniture', reported.menuAboveFurniture, true)
+      const painted = reported.menuPaint ?? {}
+      check('an open menu is painted, not clipped by the bar', (painted.head ?? {}).mine, true)
+      check('...nothing is painted over its middle', (painted.middle ?? {}).mine, true)
+      check('...and its last row is reachable, not cut off', (painted.foot ?? {}).mine, true)
       check('and offers every format and destination', reported.exportItems, 'png-1,png-2,svg,png-workspace')
       check('each row says where the file goes', typeof reported.exportHints === 'string' && reported.exportHints.indexOf('Desktop') > 0 && reported.exportHints.indexOf('conversation folder') > 0, true)
       const done = reported.exportDone ?? {}

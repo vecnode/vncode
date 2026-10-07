@@ -6421,8 +6421,12 @@ check('no ruler is rendered and no label survives in the bundle',
 check('the origin is marked on the artboard', canvasSource.includes("'data-canvas-origin': '0,0'") && canvasSource.includes("'data-canvas-origin-marker': 'true'"), true)
 // SAVE confirms what the HOST holds rather than inventing a second writer: the design is
 // already persisted on every edit, so the button re-reads the state and reports the
-// revision - two writers for one document is how a document forks.
+// revision - two writers for one document is how a document forks. It THEN hands back the
+// picture: one PNG at the design's own pixels, on the Desktop, through the same export
+// route the menu's own PNG row uses, so Save cannot produce a file the menu would not.
+// check-canvas-panel.mjs drives the button and reads the request it makes.
 check('the bar carries a Save that confirms the host revision', canvasSource.includes("}, 'Save')") && canvasSource.includes('is on the host at revision'), true)
+check('...and writes the design out to the Desktop', canvasSource.includes("writeExport('png', 1, 'desktop')"), true)
 // A CLICK ON NOTHING DE-SELECTS, and the cursor does not outlive the selection it
 // promised: the hover that carries the pointer onto a NEW selection is skipped, and a
 // drag clears the cursor it painted.
