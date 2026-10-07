@@ -1,4 +1,4 @@
-# dsh-supercollider (alpha.1)
+# dsh-supercollider (alpha.3)
 
 **SuperCollider the agent can actually play: eleven tools that make, MEASURE and
 rewrite sound, sixteen instruments to start from, and five skills that teach it the
@@ -59,7 +59,9 @@ lets `mcp/stdio.js` drive the same engine for a client that has no harness at al
   one input line, a Stop, and a server readout. No scope, no node-tree canvas, no
   SynthDef browser, no editor: `.scd` files are claimed so they open in the
   **shipped editor**, and the agent works on them through `sc_project` /
-  `sc_load`. Edit there, send, hear it here.
+  `sc_load`. Edit there, send, hear it here. It registers one tab type and the
+  Start page's capsule for it; the capsule's `title` and `description` are
+  **thunks**, because the bar calls both `()` while it draws the capsule.
 - **An MCP face for clients that are not the harness** (`mcp/stdio.js`, or
   `npm run mcp`). It is a hand-written JSON-RPC 2.0 server (initialize /
   tools/list / tools/call) over the same engine, because the pack ships no npm

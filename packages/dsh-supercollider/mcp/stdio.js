@@ -31,7 +31,7 @@ import { buildTools, TOOL_NAMES } from '../lib/tools.js'
 const PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
 
 /** The version this server reports. It must equal package.json's. */
-const SERVER_VERSION = '0.1.0-alpha.2'
+const SERVER_VERSION = '0.1.0-alpha.3'
 
 /** The instructions a client may show the model. */
 const INSTRUCTIONS = [

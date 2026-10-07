@@ -14,9 +14,8 @@
  *
  * It is a CLASSIC SCRIPT registered through `window.__ModuleLoader__.load`, with
  * no build step, requiring only the specifiers a client bundle is allowed:
- * `react`, `react/jsx-runtime` and `dsh-rightbar` (the tab registry). The style
- * is injected once, gated on `document`, from a `style[data-plugin-css]` tag the
- * check reads back.
+ * `react` and `dsh-rightbar` (the tab registry). The style is injected once,
+ * gated on `document`, from a `style[data-plugin-css]` tag the check reads back.
  */
 
 window.__ModuleLoader__.load({
@@ -27,9 +26,8 @@ window.__ModuleLoader__.load({
     Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' })
 
     const React = require('react')
-    const jsxRuntime = require('react/jsx-runtime')
 
-    exports.PLUGIN_VERSION = '0.1.0-alpha.2'
+    exports.PLUGIN_VERSION = '0.1.0-alpha.3'
 
     const TYPE_ID = 'dsh-supercollider'
     const TAB_SLOT = 'sidebar.right.pane.tab'
@@ -39,8 +37,19 @@ window.__ModuleLoader__.load({
     const CONSOLE_ROUTE = API_ROOT + '/console'
     const EVAL_ROUTE = API_ROOT + '/eval'
 
-    /** How the local view serves an answer: this is a fetch, not a stream. */
-    const h = jsxRuntime.jsx
+    /**
+     * The element factory every render below calls with VARIADIC children -
+     * `h(tag, props, child, child)`.
+     *
+     * It is `React.createElement` and NOT the automatic runtime's `jsx`, whose
+     * third argument is a KEY: `jsx('span', { className: 'x' }, 'text')` builds a
+     * `<span class="x">` with no text and no complaint. This bundle shipped bound
+     * to `jsx` and the console drew an empty frame - measured, under the real
+     * runtime: `<div class="dsu-console"></div>` and `<span class="dsu-barTitle">`,
+     * every child silently dropped. `check-client-bundles.mjs` renders both seats
+     * and would have caught it; the binding, not the call sites, is the bug.
+     */
+    const h = React.createElement
 
     const css = `
 .dsu-console{display:flex;flex-direction:column;height:100%;min-height:0;font:12px/18px var(--dsw-font-mono,ui-monospace,SFMono-Regular,Menlo,Consolas,monospace)}
@@ -294,6 +303,13 @@ window.__ModuleLoader__.load({
      * above the preview's `fallback`, and a SuperCollider piece is code, so the
      * code editor is the right surface for it. Narrowing claimed to `canOpen`
      * is refused, so the extension list is the claim.
+     *
+     * The guide capsule's contract is the bar's, not this package's: the Start
+     * page calls `entry.title()` and `entry.description?.()` while it builds the
+     * capsule, so BOTH must be functions and the label is `title`, never `label`.
+     * A string in either field throws inside the Start page's own render, and the
+     * slot core abdicates the entry it crashed in - which is the whole Start body,
+     * not the one capsule. `order` positions the capsule: 60 is behind PDFs (50).
      */
     function definition() {
       return {
@@ -306,8 +322,9 @@ window.__ModuleLoader__.load({
         guide: [
           {
             id: TYPE_ID + '/console',
-            label: 'SuperCollider console',
-            description: 'A live sclang session: type a line, send it, read what it prints.',
+            order: 60,
+            title: () => 'SuperCollider console',
+            description: () => 'A live sclang session: type a line, send it, read what it prints.',
           },
         ],
       }

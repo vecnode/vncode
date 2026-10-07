@@ -172,6 +172,36 @@ check('the tab ranks in the extension band', definition.priority, 'extension')
 check('the tab opens a .scd', definition.canOpen('pieces/drone.scd'), true)
 check('the tab leaves a .txt alone', definition.canOpen('notes.txt'), false)
 
+// ------------------------------------------------- the Start page's capsule
+//
+// `sidebarRightTabs.register` copies a `guide` entry VERBATIM, and the bar's
+// guide body then calls `entry.title()` while it builds the capsule and
+// `entry.description?.()` while it draws one - so a plain string in either field
+// throws INSIDE THE START PAGE'S OWN RENDER, and the slots core abdicates the
+// entry a render crashed in. That entry is the whole guide body, not the one
+// capsule: the Start tab then draws nothing at all while its chip is still there.
+// That is exactly how alpha.2 shipped - the capsule was written with `label` and a
+// string, and the Start tab went blank - so the fields are CALLED here, not just
+// inspected, and `label` (the field that made it look right) is refused by name.
+const capsules = definition.guide ?? []
+check('the tab contributes one Start-page capsule', capsules.length, 1)
+const capsule = capsules[0] ?? {}
+check('the capsule names its title with a thunk', typeof capsule.title, 'function')
+check('the capsule names its description with a thunk', typeof capsule.description, 'function')
+check('the capsule has no bare `label` to be mistaken for a title', capsule.label === undefined, true)
+check('the capsule is positioned among the other types', Number.isFinite(capsule.order), true)
+check('the capsule carries an id of its own', typeof capsule.id === 'string' && capsule.id.length > 0, true)
+try {
+  check(
+    'the capsule renders the two strings the Start page asks for',
+    typeof capsule.title() === 'string' && capsule.title().length > 0 && typeof capsule.description() === 'string' && capsule.description().length > 0,
+    true,
+  )
+} catch (err) {
+  check('the capsule renders the two strings the Start page asks for', false, true)
+  console.log('     ' + (err && err.message))
+}
+
 // ---------------------------------------------------------------- 3. the row, under a stub context
 const index = await import(pathToFileURL(path.join(plugin, 'lib', 'index.js')).href)
 check('the row is named', index.name, pkg.name)

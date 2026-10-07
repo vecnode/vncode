@@ -1,6 +1,6 @@
 {
   "name": "dsh-supercollider",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "SuperCollider for the agent: eleven sc_* tools that boot the audio server, compile and load SynthDefs, MEASURE what a sound actually is, and rewrite a patch while it sounds; a shelf of playable example instruments; five bundled skills that teach the language and the live-coding workflow; and a deliberately small console tab. Zero npm dependencies and no MCP server - one long-lived sclang session and a hand-written OSC client to scsynth.",
   "type": "module",
   "main": "lib/index.js",

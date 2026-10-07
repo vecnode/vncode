@@ -31,7 +31,7 @@ export const name = 'dsh-supercollider'
 export const inject = ['connection', 'tools']
 
 /** This build's marker. It must equal package.json's version. */
-export const PLUGIN_VERSION = '0.1.0-alpha.2'
+export const PLUGIN_VERSION = '0.1.0-alpha.3'
 
 /** Every route this plugin owns. */
 const API_ROOT = '/api/dsh-supercollider'
