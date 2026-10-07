@@ -8,7 +8,7 @@
 
 Agent IDE with core [DSH](https://www.deepseek.com/harness/en/).
 
-![vncode-social](./assets/vncode-banner.png)
+![vncode: 21 plugins, no core patches - the vncode README header](./assets/vncode-banner2.png)
 
 A native cross-platform app plus a pack of standard **dsh bundles**. The plugins
 are plain JavaScript with **zero npm dependencies**; the launchers run on
