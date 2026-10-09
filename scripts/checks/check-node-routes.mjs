@@ -1514,6 +1514,63 @@ try {
   )
 }
 
+// ------------------------------------------------------------------- dsh-ocr
+// The OCR row is host-only: no route, one tool, and ONE answer that can only be
+// checked by taking the engines away. A host with nothing that can recognize
+// text must be told what to install - never a crash, and never silence. The
+// engines themselves are driven in packages/dsh-ocr/checks/check-ocr-node.mjs;
+// what is pinned here is the registration and the empty-host answer, on every
+// platform this check runs on.
+{
+  const ocrModule = await import(pathToFileURL(path.join(repo, 'packages/dsh-ocr/lib/index.js')).href)
+  const ocrTools = []
+  ocrModule.apply({
+    get: () => undefined,
+    tools: { register: (tool) => (ocrTools.push(tool), () => {}) },
+    effect: (fn) => fn(),
+    logger: { debug() {}, info() {}, warn() {} },
+  })
+  check('ocr: exactly one tool, named ocr', ocrTools.map((tool) => tool.name).join(','), 'ocr')
+  const ocr = ocrTools[0]
+  check('ocr: it requires a path and nothing else', (ocr.parameters.required || []).join(','), 'path')
+  check('ocr: its arguments are closed to anything else', ocr.parameters.additionalProperties, false)
+  check(
+    'ocr: it takes the path, the language, the pages, the segmentation mode and the resolution',
+    Object.keys(ocr.parameters.properties).sort().join(','),
+    'dpi,lang,pages,path,psm',
+  )
+  check('ocr: it declares a JSON-schema surface', schemaErrors(ocr.parameters, { path: 'x' }).length, 0)
+  check('ocr: it renders a text part', ocr.output.render({}, { text: 'x', view: { file: 'f' } })[0].type, 'text')
+
+  // A host with no engine at all: an empty PATH and a platform with no built-in
+  // recognizer. The tool must still ANSWER - with the sentence that says what to
+  // install - rather than throwing at the model.
+  const ocrTemp = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-ocr-routes-'))
+  const tiny = Buffer.alloc(58)
+  tiny.write('BM', 0, 'latin1')
+  tiny.writeUInt32LE(58, 2)
+  tiny.writeUInt32LE(54, 10)
+  tiny.writeUInt32LE(40, 14)
+  tiny.writeInt32LE(1, 18)
+  tiny.writeInt32LE(1, 22)
+  tiny.writeUInt16LE(1, 26)
+  tiny.writeUInt16LE(24, 28)
+  tiny.writeUInt32LE(4, 34)
+  const tinyPath = path.join(ocrTemp, 'tiny.bmp')
+  await fsp.writeFile(tinyPath, tiny)
+  const bareDeps = ocrModule.createDeps(
+    { get: () => undefined, logger: { info() {}, warn() {} } },
+    { env: { PATH: '', PATHEXT: '.EXE', SystemRoot: '' }, platform: 'linux' },
+  )
+  const [bareTool] = ocrModule.__internals.buildTools(bareDeps)
+  const bare = await bareTool.execute({ path: tinyPath }, { agent: { session: { id: 'session-ocr' } } })
+  check('ocr: a host with no engine is answered, not thrown at', typeof bare.text, 'string')
+  check('ocr: that answer names the engine it looked for', bare.text.includes('tesseract'), true)
+  check('ocr: that answer says what to install', bare.text.includes('Install one'), true)
+  check('ocr: that answer still carries a view for the card', typeof bare.view.file, 'string')
+  await fsp.rm(ocrTemp, { recursive: true, force: true })
+}
+
 // --------------------------------------------------------- the repo manifest
 // `.dsh-version.json` is documentation, but it is documentation a PERSON reads
 // to know what is installed and at which version, and nothing else keeps it

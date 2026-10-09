@@ -1,0 +1,20 @@
+# dsh-ocr bundle layer (alpha).
+#
+# One row ('ocr') owns the whole plugin: its Node half resolves the OCR engines
+# this host has (tesseract from PATH, or the engine Windows itself ships) and
+# registers ONE tool, `ocr`, which reads the text in a raster image or a PDF
+# page. Host-only: `ocr` answers a question about a file with text, so there is
+# no route to serve and no browser half to load - the package declares no
+# dsh.client, and the boot graph gains one row.
+#
+# Nothing shipped is patched and no core row is disabled. There is no core OCR
+# row to sit in front of: core DSH reads no text out of a picture at all
+# (`read_image` hands the bytes to a model with eyes), so this row adds a
+# capability rather than replacing a surface.
+#
+# Nothing for scripts/sync-vendored.ps1 either: no engine is vendored, forked or
+# downloaded - tesseract is the machine's own, and lib/win-ocr.ps1 is written
+# here and drives Windows' built-in Windows.Media.Ocr.
+- insert:
+    - id: ocr
+      name: 'dsh-ocr'

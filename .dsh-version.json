@@ -191,6 +191,25 @@
         "the pdf-analysis skill copied into $DSH_HOME/skills by both installers"
       ]
     },
+    "dsh-ocr": {
+      "version": "0.1.0-alpha.1",
+      "rows": [
+        "ocr"
+      ],
+      "rowOverrides": [],
+      "role": "OCR: one `ocr` tool that reads the TEXT in a picture, a scan or a PDF page with a REAL engine - tesseract from PATH on any platform, or the OCR engine Windows itself ships (Windows.Media.Ocr), which needs no install at all and rasterizes a PDF page itself through Windows.Data.Pdf. The answer names the engine, the language and the page count, refuses a language the host has no data for with the list of what it CAN read, and carries the transcription caveat. Host-only: one row, no browser half, no route. See packages/dsh-ocr/README.md.",
+      "uses": [
+        "@deepseek-ai/dsh-tools (the registry the one `ocr` tool is registered into)",
+        "tesseract on PATH where it is installed (any platform; raster images only - a PDF stays dsh-pdf's pdf_scan route)",
+        "on Windows: the OCR engine built into Windows 10/11, driven through lib/win-ocr.ps1 and powershell.exe 5.1 (no install; reads raster images AND PDF pages)"
+      ],
+      "requires": [
+        "an OCR engine on the host: tesseract with the traineddata for the languages to read, or the recognizer Windows 10/11 ships - with neither, the tool says what to install and what this host CAN read instead of failing"
+      ],
+      "vendors": [
+        "NOTHING is vendored, downloaded or bundled: the engines are the machine's own (resolved from PATH or from the OS install), and lib/win-ocr.ps1 is written here"
+      ]
+    },
     "dsh-cmdbar": {
       "version": "0.1.0-alpha.17",
       "rows": [

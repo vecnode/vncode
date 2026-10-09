@@ -1,0 +1,28 @@
+{
+  "name": "dsh-ocr",
+  "version": "0.1.0-alpha.1",
+  "description": "OCR the agent can actually use: one `ocr` tool that reads the text in a picture, a scan or a PDF page with a REAL engine - tesseract from PATH where it is installed, or the OCR engine Windows itself ships, which needs no install at all and can rasterize a PDF page too. Zero npm dependencies, no engine bundled, no network egress.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "checks",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "check": "node checks/check-ocr-node.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}
